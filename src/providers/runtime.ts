@@ -11,7 +11,11 @@ export interface UpstreamPlan {
   timeoutMs?: number
   /** 覆盖默认 1 次重试：慢上游宁可一次等久点，也别 2× 超时把内联请求拖到十几秒 */
   retries?: number
-  /** 走付费通道时的回源描述 */
+  /**
+   * 走付费通道时的回源描述。
+   * `url` 是**要抓的目标**（会被编码进代理模板），不是代理服务自己的地址，
+   * 因此它必须过 provider.hosts 白名单，且绝不能来自用户输入。
+   */
   proxy?: ProxyTarget
 }
 

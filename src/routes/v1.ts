@@ -10,12 +10,24 @@ const v1 = new Hono<AppEnv>()
 
 /** 路由表由 registry 生成：新增 provider 只需改 registry，不必再写路由 */
 for (const { provider, endpoint } of allEndpoints()) {
-  const path = endpoint.path.replace(/\{(\w+)\}/g, ':$1')
+  const path = honoPath(endpoint)
   const handler = (c: Context<AppEnv>): Promise<Response> =>
     handle(c, provider.name, endpoint)
 
   if (endpoint.method === 'GET') v1.get(path, handler)
   else v1.post(path, handler)
+}
+
+/**
+ * registry 的 `{name}` 换成 Hono 的 `:name`；声明了 multiSegment 的参数换成
+ * `:name{.+}`，这样 `/economist/article/finance/2026/01/01/slug` 这类
+ * 多段路径也能命中单条路由。
+ */
+function honoPath(endpoint: EndpointDef): string {
+  return endpoint.path.replace(/\{(\w+)\}/g, (_match, name: string) => {
+    const param = endpoint.params.find((item) => item.in === 'path' && item.name === name)
+    return param?.multiSegment === true ? `:${name}{.+}` : `:${name}`
+  })
 }
 
 async function handle(

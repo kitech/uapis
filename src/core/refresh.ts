@@ -2,12 +2,13 @@ import { runtimeFor } from '../providers'
 import { consumeCredits } from './credits'
 import { encodeText, store } from './cache'
 import { ApiError, ErrorCode, fail, mapUpstreamStatus } from './errors'
-import { fetchUpstream, fetchViaProxy } from './fetcher'
+import { fetchUpstream, fetchViaProxy, pickChannel } from './fetcher'
 import { JSON_CT } from './envelope'
 import { checkGate, noteProviderFailure } from './gate'
 import { endpointByOp, providerByName, type ProviderDef } from './registry'
 import { getIntSetting, getSetting } from './settings'
 import { buildCacheKey, policyFor, type Resource } from './ttl'
+import type { ProxyChannel } from './fetcher'
 import type { Target } from './target'
 import { logError } from './logger'
 
@@ -64,8 +65,15 @@ export async function refreshTarget(
     }
   }
 
-  if (endpoint.proxy !== undefined) {
-    const channel = endpoint.proxy.channel ?? 'zenrows'
+  // 先建 plan：buildPlan 可能因参数非法抛错，不能在它之前就扣额度
+  const plan = await runtime.buildPlan(env, target)
+
+  let channel: ProxyChannel | undefined
+  if (plan.proxy !== undefined) {
+    // 通道必须先由 pickChannel 定下来再记账：显式 channel > ZenRows（消耗 credits）> Jina。
+    // 之前这里用 `endpoint.proxy.channel ?? 'zenrows'` 记账，auto 模式下实际走 Jina 却记在 ZenRows 上，
+    // 结果是 ZenRows 额度被凭空扣光而 Jina 的用量没被统计。
+    channel = await pickChannel(env, plan.proxy.channel)
     const paid = await consumeCredits(env, 'proxy', channel, 1)
     if (!paid) {
       return {
@@ -85,10 +93,9 @@ export async function refreshTarget(
     }
   }
 
-  const plan = await runtime.buildPlan(env, target)
   const response =
     plan.proxy !== undefined
-      ? await fetchViaProxy(env, plan.proxy)
+      ? await fetchViaProxy(env, { ...plan.proxy, channel })
       : await fetchUpstream(env, {
           url: plan.url,
           method: plan.method,

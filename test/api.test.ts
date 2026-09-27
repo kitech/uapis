@@ -1,7 +1,13 @@
 import { env as cloudflareEnv, exports } from 'cloudflare:workers'
 import { http, HttpResponse } from 'msw'
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { clearSettingsMemo, putSettings } from '../src/core/settings'
+import { resetRateLimitBuckets } from '../src/core/ratelimit'
+import { createExecutionContext, createMessageBatch, getQueueResult } from 'cloudflare:test'
+import { handleQueueBatch } from '../src/core/queue'
+import { consumeCredits, readCredits, resetCredits } from '../src/core/credits'
+import { cacheKeyFor } from '../src/core/refresh'
+import { encodeTarget } from '../src/core/target'
 import { network } from './server'
 
 /** miniflare 的 Cloudflare.Env 缺少 src/types.ts 里声明的 ADMIN_TOKEN，测试里做一次桥接 */
@@ -12,6 +18,14 @@ const SE = 'https://api.stackexchange.com'
 const GH = 'https://api.github.com'
 const DEVTO = 'https://dev.to/api'
 const ARXIV = 'https://export.arxiv.org'
+const ZENROWS = 'https://api.zenrows.com'
+const JINA = 'https://r.jina.ai'
+
+const ECONOMIST_HTML = `<html><head><title>Fallback</title>
+  <meta property="og:title" content="Paywalled &amp; locked">
+  <meta property="og:description" content="A summary line.">
+  <meta property="article:section" content="Finance &amp; Economics">
+</head><body><article><p>PAID FULL TEXT</p></article></body></html>`
 
 const ARXIV_ATOM = `<?xml version='1.0' encoding='UTF-8'?>
 <feed xmlns="http://www.w3.org/2005/Atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">
@@ -42,6 +56,8 @@ let seSites: { urls: string[] }
 let gh: { urls: string[]; auth: string[] }
 let devto: { urls: string[] }
 let arxiv: { urls: string[] }
+let zenrows: { urls: string[] }
+let jina: { urls: string[] }
 
 /** 每次测试都从这组默认 handler 开始，用例内的 network.use 不会污染后续用例 */
 function defaultHandlers(): ReturnType<typeof http.get>[] {
@@ -85,6 +101,14 @@ function defaultHandlers(): ReturnType<typeof http.get>[] {
       devto.urls.push(request.url)
       return HttpResponse.json({ type_of: 'user', username: 'ben' })
     }),
+    http.get(`${JINA}/`, ({ request }) => {
+      jina.urls.push(request.url)
+      return new HttpResponse(ECONOMIST_HTML, { headers: { 'content-type': 'text/html' } })
+    }),
+    http.get(`${ZENROWS}/v1/key`, ({ request }) => {
+      zenrows.urls.push(request.url)
+      return new HttpResponse(ECONOMIST_HTML, { headers: { 'content-type': 'text/html' } })
+    }),
     http.get(`${ARXIV}/api/query`, ({ request }) => {
       arxiv.urls.push(request.url)
       return new HttpResponse(ARXIV_ATOM, { headers: { 'content-type': 'application/atom+xml' } })
@@ -100,6 +124,8 @@ beforeAll(async () => {
   gh = { urls: [], auth: [] }
   devto = { urls: [] }
   arxiv = { urls: [] }
+  zenrows = { urls: [] }
+  jina = { urls: [] }
   // 测试里不真实限速：把 provider 闸门间隔压到 0
   await putSettings(env, { 'gate.min_ms': '0' })
   clearSettingsMemo()
@@ -118,6 +144,13 @@ afterEach(() => {
   gh.auth = []
   devto.urls = []
   arxiv.urls = []
+  zenrows.urls = []
+  jina.urls = []
+})
+
+// 限流是 isolate 内的固定窗口计数器，不清的话用例数一多就会互相踩出 429
+beforeEach(() => {
+  resetRateLimitBuckets()
 })
 
 afterAll(() => {
@@ -163,6 +196,7 @@ describe('元数据端点', () => {
     expect(body.providers.map((p) => p.name).sort()).toEqual([
       'arxiv',
       'devto',
+      'economist',
       'github',
       'hackernews',
       'stackexchange',
@@ -462,6 +496,198 @@ describe('P2 零 key 源', () => {
     expect(paths).toContain('/api/v1/devto/articles')
     expect(doc.paths['/api/v1/stackexchange/sites']?.get?.['x-provider']?.endpoint_auth).toBe('optional')
     expect(doc.paths['/api/v1/github/repo/{owner}/{repo}']?.get?.['x-provider']?.endpoint_auth).toBe('optional')
+  })
+})
+
+describe('P3 付费通道', () => {
+  // Miniflare 的本地 queue 会把 read 路径入队的消息真的投递给 worker，且投递是异步的。
+  // 所以这里不靠"数组长度等于 N"做断言，而是显式 handleQueueBatch 消费一条自造消息，
+  // 并用 before/after 快照比较，避免受前面用例的异步投递干扰。
+  const SLUG = 'finance/2026/01/01/some-article'
+  const PATH = `/api/v1/economist/article/${SLUG}`
+
+  function refreshMessage(slug: string) {
+    const target = { op: 'article', id: slug, query: [] as [string, string][] }
+    return {
+      id: crypto.randomUUID(),
+      timestamp: new Date(),
+      attempts: 1,
+      body: {
+        v: 1 as const,
+        k: cacheKeyFor('economist', 'wall', target),
+        p: 'economist',
+        t: encodeTarget(target),
+      },
+    } as Parameters<typeof createMessageBatch>[1][number]
+  }
+
+  async function consume(slug: string): Promise<{ refreshed: number; retried: number; dropped: number }> {
+    const batch = createMessageBatch('uapis-refresh', [refreshMessage(slug)])
+    const result = await handleQueueBatch(batch, env)
+    await getQueueResult(batch, createExecutionContext())
+    return result
+  }
+
+  beforeEach(() => {
+    zenrows.urls = []
+    jina.urls = []
+  })
+
+  it('两个通道都没配时 503 PROVIDER_UNCONFIGURED，且不打任何出口', async () => {
+    await putSettings(env, { 'zenrows.key': '', 'jina.key': '' })
+    clearSettingsMemo()
+    const res = await call(PATH)
+    expect(res.status).toBe(503)
+    const body = (await res.json()) as { code: string; details: { any_of: string[] } }
+    expect(body.code).toBe('PROVIDER_UNCONFIGURED')
+    expect(body.details.any_of).toEqual(['zenrows.key', 'jina.key'])
+    expect(zenrows.urls).toHaveLength(0)
+    expect(jina.urls).toHaveLength(0)
+  })
+
+  it('队列消费后：走 ZenRows 模板，HTML 转 JSON 落库，read 命中', async () => {
+    await putSettings(env, { 'zenrows.key': 'zr_test', 'gate.min_ms': '0' })
+    clearSettingsMemo()
+    const creditsBefore = await readCredits(env, 'proxy', 'zenrows')
+
+    const stats = await consume(SLUG)
+    expect(stats).toEqual({ processed: 1, refreshed: 1, retried: 0, dropped: 0 })
+    expect((await readCredits(env, 'proxy', 'zenrows')).used).toBe(creditsBefore.used + 1)
+
+    const hit = await call(PATH)
+    expect(hit.headers.get('x-cache')).toBe('HIT')
+    const body = (await hit.json()) as { provider: string; title: string; description: string }
+    expect(body.provider).toBe('economist')
+    expect(body.title).toBe('Paywalled & locked')
+    expect(body.description).toBe('A summary line.')
+    // 付费墙正文不会漏进缓存
+    expect(JSON.stringify(body)).not.toContain('PAID FULL TEXT')
+
+    // 命中后不再花 credits
+    const spent = await readCredits(env, 'proxy', 'zenrows')
+    await call(PATH)
+    expect((await readCredits(env, 'proxy', 'zenrows')).used).toBe(spent.used)
+  })
+
+  it('出口 URL 形如 ZenRows 模板，且目标 host 写死', async () => {
+    await putSettings(env, { 'zenrows.key': 'zr_test', 'gate.min_ms': '0' })
+    clearSettingsMemo()
+    await consume('finance/2026/01/01/template-check')
+    const proxied = new URL(zenrows.urls.at(-1)!)
+    expect(proxied.hostname).toBe('api.zenrows.com')
+    expect(proxied.searchParams.get('apikey')).toBe('zr_test')
+    expect(proxied.searchParams.get('url')).toBe(
+      'https://www.economist.com/finance/2026/01/01/template-check',
+    )
+    await putSettings(env, { 'zenrows.key': '' })
+    clearSettingsMemo()
+  })
+
+  it('只配 Jina 时自动降级到 Jina 通道', async () => {
+    await putSettings(env, { 'zenrows.key': '', 'jina.key': 'jina_test', 'gate.min_ms': '0' })
+    clearSettingsMemo()
+    await resetCredits(env, 'proxy', 'jina')
+    const creditsBefore = await readCredits(env, 'proxy', 'jina')
+
+    const stats = await consume('finance/2026/01/01/jina-article')
+    expect(stats).toEqual({ processed: 1, refreshed: 1, retried: 0, dropped: 0 })
+    expect(zenrows.urls).toHaveLength(0)
+    const proxied = new URL(jina.urls.at(-1)!)
+    expect(proxied.hostname).toBe('r.jina.ai')
+    expect(proxied.searchParams.get('url')).toBe(
+      'https://www.economist.com/finance/2026/01/01/jina-article',
+    )
+    expect((await readCredits(env, 'proxy', 'jina')).used).toBe(creditsBefore.used + 1)
+
+    await putSettings(env, { 'zenrows.key': '', 'jina.key': '' })
+    clearSettingsMemo()
+  })
+
+  it('付费通道额度用尽：消息被丢弃，不重试也不打出口', async () => {
+    await putSettings(env, { 'zenrows.key': 'zr_test', 'gate.min_ms': '0' })
+    clearSettingsMemo()
+    await resetCredits(env, 'proxy', 'zenrows')
+    await consumeCredits(env, 'proxy', 'zenrows', 33)
+    expect((await readCredits(env, 'proxy', 'zenrows')).remaining).toBe(0)
+
+    const stats = await consume('finance/2026/01/01/no-credits')
+    expect(stats).toEqual({ processed: 1, refreshed: 0, retried: 0, dropped: 1 })
+    expect(zenrows.urls).toHaveLength(0)
+
+    await resetCredits(env, 'proxy', 'zenrows')
+    await putSettings(env, { 'zenrows.key': '' })
+    clearSettingsMemo()
+  })
+
+  it('/status 里 economist 报通道配置与通道额度', async () => {
+    await putSettings(env, { 'zenrows.key': 'zr_test', 'jina.key': '' })
+    clearSettingsMemo()
+    await resetCredits(env, 'proxy', 'zenrows')
+    await consumeCredits(env, 'proxy', 'zenrows', 2)
+    const used = (await readCredits(env, 'proxy', 'zenrows')).used
+
+    const res = await call('/status')
+    const body = (await res.json()) as {
+      providers: {
+        name: string
+        status: string
+        channels: { setting: string; configured: boolean; credits: { used: number } }[] | null
+      }[]
+    }
+    const eco = body.providers.find((p) => p.name === 'economist')!
+    expect(eco.status).toBe('active')
+    expect(eco.channels).toHaveLength(2)
+    expect(eco.channels![0]).toMatchObject({ setting: 'zenrows.key', configured: true })
+    expect(eco.channels![0]!.credits.used).toBeGreaterThanOrEqual(used)
+    expect(eco.channels![1]).toMatchObject({ setting: 'jina.key', configured: false })
+
+    // 一条通道都没配时状态就是 unconfigured
+    await putSettings(env, { 'zenrows.key': '' })
+    clearSettingsMemo()
+    const off = (await (await call('/status')).json()) as typeof body
+    expect(off.providers.find((p) => p.name === 'economist')!.status).toBe('unconfigured')
+  })
+
+  it('未声明的 query 与编码穿越都在回源前被拒', async () => {
+    await putSettings(env, { 'zenrows.key': 'zr_test', 'gate.min_ms': '0' })
+    clearSettingsMemo()
+
+    // `..` 被 URL 归一化掉，路由直接 404
+    expect((await call('/api/v1/economist/article/..')).status).toBe(404)
+    // 未声明的 query 参数在 read 路径就被拒
+    const bad = await call('/api/v1/economist/article/a/b?url=https://evil.example.com')
+    expect(bad.status).toBe(400)
+    expect(((await bad.json()) as { code: string }).code).toBe('INVALID_PARAMETER')
+
+    // 百分号编码的路径穿越绕过 URL 归一化，由 buildPlan 拦下
+    const stats = await consume('a/%2e%2e/%2e%2e/etc/passwd')
+    expect(stats).toEqual({ processed: 1, refreshed: 0, retried: 0, dropped: 1 })
+    expect(zenrows.urls.some((url) => url.includes('%2e%2e') || url.includes('/etc/'))).toBe(false)
+
+    await putSettings(env, { 'zenrows.key': '' })
+    clearSettingsMemo()
+  })
+
+  it('付费端点不内联：read 路径只入队，同步不烧 credits', async () => {
+    await putSettings(env, { 'zenrows.key': 'zr_test' })
+    clearSettingsMemo()
+    const creditsBefore = await readCredits(env, 'proxy', 'zenrows')
+
+    // 用一个还没被前面的用例缓存过的 slug，才能走到真正的 miss 分支
+    const res = await call('/api/v1/economist/article/finance/2026/01/01/never-inlined')
+    expect(res.status).toBe(503)
+    expect(res.headers.get('x-cache')).toBe('QUEUED')
+    expect(res.headers.get('retry-after')).toBeTruthy()
+    expect(zenrows.urls).toHaveLength(0)
+    expect((await readCredits(env, 'proxy', 'zenrows')).used).toBe(creditsBefore.used)
+  })
+
+  it('Prefer: respond-async 返回 202', async () => {
+    const res = await call('/api/v1/economist/article/finance/2026/01/01/async-article', {
+      headers: { prefer: 'respond-async' },
+    })
+    expect(res.status).toBe(202)
+    expect(((await res.json()) as { code: string }).code).toBe('ACCEPTED')
   })
 })
 

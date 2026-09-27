@@ -9,7 +9,7 @@ INSERT OR REPLACE INTO settings (k, v, updated_at) VALUES
   ('cache.soft_rows',    '80000',  0),
   ('ratelimit.rpm',      '60',     0),
   ('cors.origins',       '*',      0),
-  ('upstream.allowlist', 'api.stackexchange.com,hn.algolia.com,api.github.com,dev.to,export.arxiv.org', 0),
+  ('upstream.allowlist', 'api.stackexchange.com,hn.algolia.com,api.github.com,dev.to,export.arxiv.org,api.zenrows.com,r.jina.ai', 0),
   ('queue.daily_limit',  '3000',   0),
   ('queue.soft_limit',   '2700',   0),
   ('warm.list',          '',       0),
@@ -21,5 +21,5 @@ INSERT OR REPLACE INTO settings (k, v, updated_at) VALUES
   ('quota.github.default',         '4500', 0),
   ('quota.devto.default',          '9000', 0),
   ('quota.arxiv.default',          '4000', 0),
-  ('proxy.zenrows.daily_credits',  '33', 0),
-  ('proxy.logical_daily_keys',     '50', 0);
+  ('quota.proxy.zenrows',          '33', 0),
+  ('quota.proxy.jina',             '50', 0);

@@ -74,6 +74,23 @@ export async function serveResource(
     }
   }
 
+  // 付费通道：两条通道任一可用即可，全空时直接 503，
+  // 别让请求进队列白烧一次 refresh 额度
+  if (fallback === null && (provider.requiredAnyOf ?? []).length > 0) {
+    const keys = provider.requiredAnyOf ?? []
+    const configured = await Promise.all(keys.map((key) => getSetting(c.env, key)))
+    if (configured.every((value) => value.length === 0)) {
+      return errorResponse(
+        c,
+        fail(ErrorCode.ProviderUnconfigured, `${provider.displayName} 未配置可用通道`, 503, {
+          provider: provider.name,
+          any_of: keys,
+          hint: 'set any of these via /admin/settings',
+        }),
+      )
+    }
+  }
+
   if (fallback === null) {
     const maintenance = (await getSetting(c.env, 'maintenance.mode')).toLowerCase()
     if (maintenance !== 'active') {

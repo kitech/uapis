@@ -141,3 +141,37 @@ arXiv 官方要求调用方把结果缓存至少 15 分钟，这是 ToS 的一�
 **理由**：`@cloudflare/vitest-pool-workers` 0.22 已经移除 `fetchMock`；
 `SELF` 走辅助 worker，全局 mock 不一定生效。`exports.default.fetch` 在同一 isolate 里跑，
 MSW 的 fetch 拦截直接生效，测试全离线。
+
+## tier C 永不内联
+
+**决策**：走付费代理通道的端点一律 `inline: false`，`validateRegistry()` 强制检查。
+
+**理由**：内联回源发生在同步请求路径上，那里没有额度节流——一次突发（或一个爬虫）
+就能把当天的 ZenRows credits 打光，而且没有任何地方能事后统计是谁打的。
+改成入队后，消费侧有闸门和 `quota.proxy.*` 双重保护，
+miss 请求本身几乎不花钱。代价是首次请求拿不到数据（`503 REBUILDING`），对墙内容可以接受。
+
+## 目标 host 与出口 host 分开声明
+
+**决策**：`ProviderDef.hosts` 是"这个 provider 允许接触的目标 host"（用来校验 `proxy.host`），
+`egressHosts` 是"真正出网的 host"，`validateRegistry()` 按后者查白名单。
+
+**理由**：tier C 的目标 host（如 `www.economist.com`）我们从不直连，
+把目标 host 放进 `upstream.allowlist` 等于给了一条"万一哪天有个 bug 就能直连"的路。
+按出口校验之后，白名单里只有代理服务自己，SSRF 面反而更小。
+
+## 多段路径参数显式声明
+
+**决策**：`ParamDef.multiSegment` 为真时，路由生成为 Hono 的 `:name{.+}`。
+
+**理由**：Hono 的 `:name` 只吃一段，`economist/article/finance/2026/01/01/slug` 会 404。
+与其在路由里写特例，不如让参数自己声明形态；代价是这类参数要自己校验
+（`.`、`..`、query 注入），路由层只保证非空。
+
+## 额度类错误不重试
+
+**决策**：队列消费只对 503/504 重试，且 `QUOTA_EXHAUSTED`、`PROVIDER_UNCONFIGURED`
+即使状态码是 503 也直接丢弃。
+
+**理由**：这两个错误重试不会变好——额度不会随时间自己长回来，通道也不会自己被配好。
+在 tier C 上尤其明显：重试 3 次等于把当天的 credits 白烧两次。

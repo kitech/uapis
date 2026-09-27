@@ -11,10 +11,14 @@
 | A | 官方公开 API，无需凭据，宽松限流 | hackernews |
 | A- | 官方 API 匿名可用，但限流严格或需要限速 | github（token 可选）、devto、arxiv |
 | B | 官方 API 但要注册 key | stackexchange |
-| C | 付费墙/非官方源，必须走付费代理通道 | 计划中（P3） |
+| C | 付费墙/非官方源，必须走付费代理通道 | economist |
 
 `github` 的三个端点都标了 `auth: 'optional'`：配了 `gh.token` 自动提额，不配也能匿名调用。
 `/status` 会把它报成 `active` 并给出 `auth_required=false`，不会误报成 `unconfigured`。
+
+tier C 没有单一的 `auth.settingKey`，而是 `requiredAnyOf`：ZenRows / Jina 任一可用即可。
+两条都空时 `serveResource()` 直接返回 `503 PROVIDER_UNCONFIGURED`，
+`details.any_of` 会列出该配哪几个键——不排队，因为排了也回不了源。
 
 ## Hacker News（Algolia）· tier A
 
@@ -101,6 +105,31 @@
 - 不是通用 XML 解析器：只认 arXiv `api/query` 的固定结构，上游改结构才会失效
 - `search_query` 白名单字符（`&`、`%` 等一律拒掉），防止拼出意料之外的 URL
 
+## The Economist · tier C（付费通道）
+
+| 方法 | 路径 | 参数 |
+| --- | --- | --- |
+| GET | `/api/v1/economist/article/{slug}` | 路径 `slug`：文章路径，**可含 `/`**，如 `finance/2026/01/01/some-article` |
+
+- 目标 host `www.economist.com` **我们不直连**：只走 ZenRows（`api.zenrows.com`）
+  或 Jina（`r.jina.ai`），出口由 `egressHosts` 声明并单独过白名单
+- 两条通道都没配 → `503 PROVIDER_UNCONFIGURED`，`details.any_of = ["zenrows.key","jina.key"]`
+- 通道选择顺序：`UpstreamPlan.proxy.channel` 显式声明 > `proxy.mode` 指定 >
+  ZenRows（有 key 且有额度时）> Jina。`proxy.mode` 的 `off` / `auto` 都表示"没有偏好"，
+  它只影响声明了 `proxy` 的端点，不会让任何源绕过付费通道直连
+- 每日额度：`quota.proxy.zenrows`（默认 33）、`quota.proxy.jina`（默认 50），
+  打到 0 就是 `503 QUOTA_EXHAUSTED`，队列消息直接丢弃而不是重试
+- **不内联回源**（`inline: false`）：同步路径没有额度节流，一次突发就能把当天 credits 打光；
+  首次请求返回 `503 REBUILDING` + `X-Cache: QUEUED`（带 `Prefer: respond-async` 则 202），
+  队列消费后才落库
+- 只提取 `og:title` / `og:description` / `article:section` / 发布时间，
+  **不搬运正文**；付费墙正文既不进缓存也不进响应
+- 缓存档 `wall`：24 小时新鲜期 + 7 天 stale
+- slug 白名单 `^[A-Za-z0-9][A-Za-z0-9._/-]{0,180}$`，并额外拒掉 `..` 相对路径段；
+  目标 host 写死在常量里，调用方塞不进自己的域名
+- **合规前提**：只适合条款允许代理转发/引用的源。接任何 tier C 源之前，
+  先自己读一遍它的 `tos`；只做标题与摘要这类元数据，不搬运正文
+
 ## 配 key
 
 ```bash
@@ -114,8 +143,9 @@ curl -X PUT https://<你的域名>/admin/settings \
 
 只有 `se.key` 是必需的（不配就是 `503 PROVIDER_UNCONFIGURED`）。
 `gh.token` 配不配都能跑：配了走 `Authorization: Bearer`，不配就匿名。
-`reddit.*`、`youtube.key`、`ph.key`、`lastfm.key`、`telegram.token`、`zenrows.key`、
-`jina.key` 这些预留给 P3 的 key 不要写进 `migrations/seed.sql`。
+`zenrows.key` / `jina.key` 任一即可让 tier C 源可用，两个都不配时该源报 `unconfigured`。
+`reddit.*`、`youtube.key`、`ph.key`、`lastfm.key`、`telegram.token` 这些预留给后续阶段的 key
+不要写进 `migrations/seed.sql`。
 
 ## 查看状态
 
@@ -161,8 +191,16 @@ curl -s https://<你的域名>/status | jq '.providers'
    和 `runtime.buildPlan()`（把 Target 变成上游 URL）。
 2. 在 `src/providers/index.ts` 注册。
 3. 在 `settings.upstream.allowlist` 里加上 host——`validateRegistry()` 自检会拦住漏配。
-4. 补 `test/unit.test.ts` 的 registry 断言和一条集成测试。
-5. `/openapi.json`、`/llms.txt`、文档表格自动更新。
+   tier C 的源不直连目标 host，加的是 `egressHosts` 里的代理出口。
+4. tier C 还必须写 `requiredAnyOf`（可用通道的 setting 列表），
+   且每个端点都要有 `proxy`、`inline: false`。
+5. 补 `test/unit.test.ts` 的 registry 断言和一条集成测试。
+6. `/openapi.json`、`/llms.txt`、文档表格自动更新。
 
 `src/core/registry.ts` 的 `validateRegistry()` 会在单元测试里检查：
-operationId 唯一、path 参数与声明一致、host 已进白名单。漏一步就会红。
+operationId 唯一、path 参数与声明一致、host 已进白名单、tier C 必须有 `proxy`
+与 `requiredAnyOf`、付费通道端点不允许 `inline`。漏一步就会红。
+
+多段路径参数（如 `economist/article/{slug}` 的 slug 含 `/`）在 `ParamDef` 上标
+`multiSegment: true`，路由生成时会变成 Hono 的 `:slug{.+}`；
+这类参数必须自己校验，路由层只管非空。

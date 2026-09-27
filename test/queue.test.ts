@@ -160,6 +160,26 @@ describe('队列消费', () => {
     expect(outcome.retryMessages).toHaveLength(1)
   })
 
+  it('额度用尽（tier C 付费通道）直接 ack，不浪费 3 次 retry', async () => {
+    // 付费通道的额度不会随时间自己长回来，重试没有意义
+    await consumeCredits(env, 'proxy', 'zenrows', 33)
+    const target = { op: 'article', id: 'a/b', query: [] as [string, string][] }
+    const body = {
+      v: 1 as const,
+      k: cacheKeyFor('economist', 'wall', target),
+      p: 'economist',
+      t: encodeTarget(target),
+    }
+    const batch = createMessageBatch(QUEUE, [msg(body)])
+    const ctx = createExecutionContext()
+    const queueStats = stats()
+    await handleMessage(batch.messages[0]!, env, queueStats)
+
+    expect(queueStats).toEqual({ processed: 1, refreshed: 0, retried: 0, dropped: 1 })
+    expect((await getQueueResult(batch, ctx)).retryMessages).toHaveLength(0)
+    expect((await readCredits(env, 'proxy', 'zenrows')).remaining).toBe(0)
+  })
+
   it('批量两条消息各落一行', async () => {
     const batch = createMessageBatch(QUEUE, [msg(itemBody('1')), msg(itemBody('2'))])
     const ctx = createExecutionContext()

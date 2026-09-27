@@ -22,6 +22,7 @@
 | CPU 估算 | 解析成本写下来，超 5ms 就要重新设计 | `costMs` / `parseCostMs` |
 | 缓存档位 | 选对 `resource` | `resource` |
 | 回归测试 | 至少一条集成测试 | `test/api.test.ts` |
+| 付费通道（仅 tier C） | 声明 `proxy` + `requiredAnyOf`，`inline: false` | 自检强制 |
 
 ## 当前状态
 
@@ -83,6 +84,24 @@
 - 端点：`search`、`paper/{id}`，都是 archive 档
 - 额度：`quota.arxiv.default` = 4000
 
+### economist · tier C ⚠️ 需自行确认条款
+
+- 目标 host：`www.economist.com`——**我们不直连**，只作为 `proxy.host` 的校验对象；
+  真正出网的是 `egressHosts = [api.zenrows.com, r.jina.ai]`
+- 通道：`zenrows.key` / `jina.key` 任一即可（`requiredAnyOf`），两条都空时
+  `503 PROVIDER_UNCONFIGURED`，`details.any_of` 列出该配哪个
+- 端点：`article/{slug}`（wall 档，24h 新鲜 + 7 天 stale），`inline: false`——
+  首次请求只入队，返回 `503 REBUILDING` + `X-Cache: QUEUED`
+- 只提取 `og:title` / `og:description` / `article:section` / 发布时间，**不搬运正文**
+- slug 走 `multiSegment`（含 `/`），白名单字符 + 显式拒 `..`，目标 host 写死在常量里
+- 额度：`quota.proxy.zenrows` = 33、`quota.proxy.jina` = 50；打满后消息直接丢弃不重试
+- 归属：内容版权归 The Economist 所有
+- 条款：<https://www.economist.com/help/legal/terms-of-use>
+- **⚠️ 上线前自己再读一遍条款**：本项目只取标题与摘要这类元数据，不提供免费绕过，
+  但"是否允许代理转发/引用"是条款解释问题，不是代码能保证的事。
+  不同意就把这个 provider 从 `src/providers/index.ts` 里摘掉，
+  代理机制本身（`pickChannel` / `quota.proxy.*` / tier C 校验）与它无关
+
 ## 计划中
 
 以下源已列入路线图，接入时逐条过上面的 checklist：
@@ -94,7 +113,8 @@
 > 说明：dev.to / GitHub / arXiv 已于 P2 接入（见上）。Wikipedia 与 Open Library
 > 在开发机上网络不通（连接超时），无法实测响应结构，因此没有凭印象写进来。
 > 接任何新源之前必须先 curl 一遍确认能通、能拿到预期结构。
-- **付费墙源**（tier C）：必须走 ZenRows / Jina 双通道，`proxy.mode` 控制，
+- **付费墙源**（tier C）：机制已就绪（ZenRows / Jina 双通道、额度、tier C 校验），
+  economist 已接入作为参考实现；下一个源同样要先过条款这一关，
   绝不提供免费绕过路径
 
 ## 复审节奏

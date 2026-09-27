@@ -8,8 +8,12 @@ import { parseMessage } from '../src/core/queue'
 import { allEndpoints, operationIdOf, REGISTRY, validateRegistry } from '../src/core/registry'
 import { buildOpenApi } from '../src/core/openapi'
 import { assertAllowedUpstream, userAgent } from '../src/core/fetcher'
+import { consumeCredits, readCredits, resetCredits } from '../src/core/credits'
 import { runtimeFor } from '../src/providers'
 import { parseAtom } from '../src/providers/arxiv'
+import { extractArticle } from '../src/providers/economist'
+import { egressHostsOf, providerByName } from '../src/core/registry'
+import { pickChannel } from '../src/core/fetcher'
 
 /** miniflare 的 Cloudflare.Env 缺少 src/types.ts 里声明的 ADMIN_TOKEN，测试里做一次桥接 */
 const env = cloudflareEnv as unknown as Env
@@ -20,6 +24,8 @@ const ALLOWLIST = [
   'api.github.com',
   'dev.to',
   'export.arxiv.org',
+  'api.zenrows.com',
+  'r.jina.ai',
 ]
 
 describe('错误体与状态码映射', () => {
@@ -400,6 +406,146 @@ describe('arXiv Atom 解析（零依赖、有界）', () => {
     expect(feed.total).toBe(0)
     expect(feed.entries.length).toBe(1)
     expect(feed.entries[0]!.id).toBe('')
+  })
+})
+
+describe('P3 付费通道（tier C）', () => {
+  const eco = runtimeFor('economist')!
+
+  it('双通道都没配就 503，不做任何免费尝试', async () => {
+    await putSettings(env, { 'zenrows.key': '', 'jina.key': '' })
+    clearSettingsMemo()
+    await expect(eco.buildPlan(env, { op: 'article', id: 'foo', query: [] })).rejects.toThrow(
+      /no paid channel configured/,
+    )
+  })
+
+  it('只配 jina 也能建 plan，通道由 pickChannel 决定', async () => {
+    await putSettings(env, { 'zenrows.key': '', 'jina.key': 'jina_test' })
+    clearSettingsMemo()
+    const plan = await eco.buildPlan(env, { op: 'article', id: 'finance/2026/01/01/x', query: [] })
+    expect(plan.url).toBe('https://www.economist.com/finance/2026/01/01/x')
+    expect(plan.proxy?.url).toBe(plan.url)
+    // endpoint 显式声明了 zenrows，所以显式优先于设置
+    expect(await pickChannel(env, 'zenrows')).toBe('zenrows')
+    expect(await pickChannel(env)).toBe('jina')
+  })
+
+  it('目标 host 来自 registry 常量，路径穿越与查询注入都被拒', async () => {
+    await putSettings(env, { 'zenrows.key': 'zr_test' })
+    clearSettingsMemo()
+    const plan = await eco.buildPlan(env, { op: 'article', id: '/finance/2026/01/01/x/', query: [] })
+    expect(plan.url).toBe('https://www.economist.com/finance/2026/01/01/x')
+    expect(plan.proxy?.url).toBe('https://www.economist.com/finance/2026/01/01/x')
+    // 穿越、协议注入、query 注入都不给过
+    for (const bad of ['a/../../etc/passwd', '../secret', 'x/..', '..', 'x?a=1', 'x#f', 'x y', 'x%2f..%2fy', 'https://evil.example.com']) {
+      await expect(eco.buildPlan(env, { op: 'article', id: bad, query: [] })).rejects.toThrow(
+        /invalid slug/,
+      )
+    }
+    // 前导斜杠剥掉后 host 仍由常量决定：调用方塞不进自己的域名
+    const sneaky = await eco.buildPlan(env, { op: 'article', id: '//evil.example.com/x', query: [] })
+    expect(new URL(sneaky.url).hostname).toBe('www.economist.com')
+    // 单个 `.` 允许（真实 slug 里会有），`..` 一律拒
+    expect((await eco.buildPlan(env, { op: 'article', id: 'a.b/c-d_e', query: [] })).url).toBe(
+      'https://www.economist.com/a.b/c-d_e',
+    )
+    await putSettings(env, { 'zenrows.key': '' })
+    clearSettingsMemo()
+  })
+
+  it('出口白名单按 egressHosts 校验：目标 host 不必、也不该在白名单里', () => {
+    const provider = providerByName('economist')!
+    expect(egressHostsOf(provider)).toEqual(['api.zenrows.com', 'r.jina.ai'])
+    expect(provider.hosts).toEqual(['www.economist.com'])
+    // 直连付费墙源必须被拦住
+    expect(ALLOWLIST).not.toContain('www.economist.com')
+    const result = validateRegistry(ALLOWLIST)
+    expect(result.problems).toEqual([])
+  })
+
+  it('registry 强制 tier C 必须声明 proxy 且不许 inline', () => {
+    const provider = providerByName('economist')!
+    const endpoint = provider.endpoints[0]!
+    expect(provider.tier).toBe('C')
+    expect(endpoint.proxy).toBeDefined()
+    expect(endpoint.inline).toBe(false)
+    expect(endpoint.passthrough).toBe(false)
+    expect(endpoint.resource).toBe('wall')
+    expect(TTL_POLICIES.wall.ttlSeconds).toBe(86_400)
+  })
+
+  it('tier C 必须声明 requiredAnyOf，economist 列出两条付费通道', () => {
+    for (const provider of REGISTRY.filter((p) => p.tier === 'C')) {
+      expect(provider.requiredAnyOf ?? []).toContain('zenrows.key')
+      expect(provider.requiredAnyOf ?? []).toContain('jina.key')
+    }
+  })
+
+  it('multiSegment 只允许 path 参数，economist 的 slug 走多段路由', () => {
+    const endpoint = providerByName('economist')!.endpoints[0]!
+    const slug = endpoint.params.find((param) => param.name === 'slug')!
+    expect(slug.in).toBe('path')
+    expect(slug.multiSegment).toBe(true)
+    // 其他 provider 的路径参数都是单段
+    for (const { provider, endpoint: item } of allEndpoints()) {
+      if (provider.name === 'economist') continue
+      for (const param of item.params.filter((x) => x.multiSegment === true)) {
+        expect(`${provider.name}.${item.op}.${param.name}`).toBe('')
+      }
+    }
+  })
+
+  it('通道优先级：hint > proxy.mode > ZenRows(有额度) > Jina', async () => {
+    await putSettings(env, { 'zenrows.key': '', 'jina.key': '' })
+    clearSettingsMemo()
+    await expect(pickChannel(env)).rejects.toThrow(/no proxy channel configured/)
+
+    // 只配 Jina
+    await putSettings(env, { 'zenrows.key': '', 'jina.key': 'jina_test' })
+    clearSettingsMemo()
+    expect(await pickChannel(env)).toBe('jina')
+    // off / auto 都表示"没有偏好"，不会因为叫 off 就把付费通道关掉
+    expect(await pickChannel(env, 'zenrows')).toBe('zenrows')
+
+    // ZenRows 有额度时优先 ZenRows
+    await putSettings(env, { 'zenrows.key': 'zr_test' })
+    clearSettingsMemo()
+    await resetCredits(env, 'proxy', 'zenrows')
+    expect(await pickChannel(env)).toBe('zenrows')
+
+    // 额度打满则退到 Jina
+    await consumeCredits(env, 'proxy', 'zenrows', 33)
+    expect(await pickChannel(env)).toBe('jina')
+
+    // proxy.mode 可以强制某一条
+    await putSettings(env, { 'proxy.mode': 'jina' })
+    clearSettingsMemo()
+    expect(await pickChannel(env)).toBe('jina')
+    await putSettings(env, { 'proxy.mode': 'off', 'zenrows.key': '', 'jina.key': '' })
+    clearSettingsMemo()
+  })
+
+  it('付费通道的额度键接上了 consumeCredits 的维度', async () => {
+    // 之前只有 proxy.zenrows.daily_credits 这个没人读的键，等于没有上限
+    const zenrows = await readCredits(env, 'proxy', 'zenrows')
+    const jina = await readCredits(env, 'proxy', 'jina')
+    expect(zenrows.limit).toBe(33)
+    expect(jina.limit).toBe(50)
+  })
+
+  it('只提取公开元数据，不搬运正文', () => {
+    const html = `<html><head><title>Fallback title</title>
+      <meta property="og:title" content="Paywalled &amp; locked">
+      <meta property="og:description" content="A summary   line.">
+      <meta name="article:section" content="Finance &amp; Economics">
+      <meta property="article:published_time" content="2026-01-01T00:00:00Z">
+    </head><body><article><p>FULL PAID TEXT MUST NOT LEAK</p></article></body></html>`
+    const out = extractArticle(html)
+    expect(out.title).toBe('Paywalled & locked')
+    expect(out.description).toBe('A summary line.')
+    expect(out.section).toBe('Finance & Economics')
+    expect(JSON.stringify(out)).not.toContain('FULL PAID TEXT')
   })
 })
 

@@ -29,7 +29,7 @@
 | `RATE_LIMITED` | 429 / 503 | 入口限流（429）或 provider 闸门冷却（503） | 看 `Retry-After` / `details.retry_in` |
 | `INTERNAL_ERROR` | 500 | Worker 内部异常 | 带上 `X-Request-ID` 反馈 |
 | `UPSTREAM_ERROR` | 502 | 上游 5xx | 稍后重试，会命中负缓存 |
-| `PROVIDER_UNCONFIGURED` | 503 | 缺 key | 配 `details.setting` 指定的设置项 |
+| `PROVIDER_UNCONFIGURED` | 503 | 缺 key，或付费通道一个都没配 | 配 `details.setting` 指定的设置项；tier C 看 `details.any_of`，配其中任意一个 |
 | `QUOTA_EXHAUSTED` | 503 | 今日队列/上游额度用尽 | 等 UTC 日切或调大额度 |
 | `REBUILDING` | 503 | 已入队但还没有数据 | 按 `Retry-After` 重试 |
 | `SERVICE_UNAVAILABLE` | 503 | 只读/维护模式 | 看 `details.mode` |
@@ -55,6 +55,16 @@
 **`503 RATE_LIMITED` 但我只有一个请求？**
 provider 闸门是按 provider 全局的最小间隔（当前 300ms）。别的 key 刚刷新过同一个 provider，
 你的请求就进冷却了。可以在测试/自用场景把 `gate.min_ms` 调小。
+
+**tier C 源报 `PROVIDER_UNCONFIGURED`，`details` 里没有 `setting` 只有 `any_of`？**
+对，tier C 没有单一 key：ZenRows / Jina 任一可用即可。
+`any_of: ["zenrows.key","jina.key"]` 是"配其中任意一个"的意思，配好之后
+`/status` 的 `providers[].channels` 会显示哪条通道生效、还剩多少 credits。
+
+**付费墙源第一次请求是 `503 REBUILDING`？**
+tier C 端点不内联回源（`inline: false`）：同步路径没有额度节流，
+一次突发就能把当天的付费 credits 打光。请求只入队，
+加 `Prefer: respond-async` 会返回 `202 ACCEPTED`，队列消费完再读就是 `HIT`。
 
 **`INVALID_PARAMETER` 里 `allowed` 是什么？**
 当前端点声明的白名单参数名。白名单之外的参数一律 400，不做静默忽略——

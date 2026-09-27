@@ -2,6 +2,7 @@ import type { ProviderDef } from '../core/registry'
 import type { ProviderRuntime } from './runtime'
 import { def as arxivDef, runtime as arxivRuntime } from './arxiv'
 import { def as devtoDef, runtime as devtoRuntime } from './devto'
+import { def as economistDef, runtime as economistRuntime } from './economist'
 import { def as githubDef, runtime as githubRuntime } from './github'
 import { def as hackernewsDef, runtime as hackernewsRuntime } from './hackernews'
 import { def as stackexchangeDef, runtime as stackexchangeRuntime } from './stackexchange'
@@ -13,10 +14,18 @@ export const providers: ProviderDef[] = [
   githubDef,
   devtoDef,
   arxivDef,
+  economistDef,
 ]
 
 const runtimes = new Map<string, ProviderRuntime>(
-  [stackexchangeRuntime, hackernewsRuntime, githubRuntime, devtoRuntime, arxivRuntime].map(
+  [
+    stackexchangeRuntime,
+    hackernewsRuntime,
+    githubRuntime,
+    devtoRuntime,
+    arxivRuntime,
+    economistRuntime,
+  ].map(
     (runtime) => [runtime.name, runtime],
   ),
 )

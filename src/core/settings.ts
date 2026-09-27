@@ -15,7 +15,7 @@ export const SETTINGS_DEFAULTS: Readonly<Record<string, string>> = Object.freeze
   'gate.min_ms': '',
   'cors.origins': '*',
   'upstream.allowlist':
-    'api.stackexchange.com,hn.algolia.com,api.github.com,dev.to,export.arxiv.org',
+    'api.stackexchange.com,hn.algolia.com,api.github.com,dev.to,export.arxiv.org,api.zenrows.com,r.jina.ai',
   'queue.daily_limit': '3000',
   'queue.soft_limit': '2700',
   'warm.list': '',
@@ -23,8 +23,10 @@ export const SETTINGS_DEFAULTS: Readonly<Record<string, string>> = Object.freeze
   'proxy.zenrows_url':
     'https://api.zenrows.com/v1/key?apikey={key}&url={url}&mode={mode}&javascript=allowed&wait=20000',
   'proxy.jina_url': 'https://r.jina.ai/?url={url}',
-  'proxy.zenrows.daily_credits': '33',
-  'proxy.logical_daily_keys': '50',
+  // 付费通道的每日上限：走 credits.ts 的 quota.<provider>.<channel> 维度，
+  // 之前只有 proxy.* 这两个键而没人读，等于付费通道完全没有上限
+  'quota.proxy.zenrows': '33',
+  'quota.proxy.jina': '50',
   'quota.stackexchange.default': '9500',
   'quota.hackernews.default': '10000',
   'quota.github.default': '4500',

@@ -51,6 +51,11 @@ export const rateLimit = (): MiddlewareHandler<AppEnv> => {
   }
 }
 
+/** 仅供测试：清空窗口计数器，让每个用例从干净状态开始（限流行为由 ratelimit.test.ts 覆盖） */
+export function resetRateLimitBuckets(): void {
+  buckets.clear()
+}
+
 function takeBucket(key: string, now: number, limit: number): Bucket {
   const existing = buckets.get(key)
   if (existing !== undefined && existing.resetAt > now) {

@@ -4,7 +4,7 @@
 
 ## [0.1.0] - 2026-09-27
 
-P0 骨架 + P1 端点完善 + P2 零 key 源批量接入。
+P0 骨架 + P1 端点完善 + P2 零 key 源批量接入 + P3 付费代理通道。
 
 ### Added
 
@@ -40,7 +40,22 @@ P0 骨架 + P1 端点完善 + P2 零 key 源批量接入。
   - query 参数支持 `required`，缺失直接 400
   - `/status` 新增 `auth_required` / `auth_optional`，
     端点级 optional 的 provider（如 github）不再误报 `unconfigured`
-- 离线测试：`vitest-pool-workers` + `@msw/cloudflare` 出站拦截，109 个用例全离线
+- P3 付费代理通道（tier C 机制 + 首个实现）：
+  - `ProviderDef.egressHosts`：目标 host（`hosts`，只用于校验 `proxy.host`）与真正出网的
+    出口 host 分开声明，白名单按出口校验，tier C 源不会把付费墙域名放进出网名单
+  - `ProviderDef.requiredAnyOf`：tier C 用"任一通道可用即可"表达可配性；
+    两条都空时 read 路径直接 `503 PROVIDER_UNCONFIGURED` 并在 `details.any_of` 列出该配哪个键
+  - `/status` 新增 `providers[].channels`，给出每条通道的 `configured` 与 credits
+  - 付费通道额度 `quota.proxy.zenrows`(33) / `quota.proxy.jina`(50)，
+    取代原先无人读取的 `proxy.zenrows.daily_credits` / `proxy.logical_daily_keys`
+  - credits 记账移到 `buildPlan` 之后：按 `pickChannel` 实际选中的通道扣费，
+    修掉 auto 模式走 Jina 却记到 ZenRows 头上的问题
+  - 队列只重试 503/504；`QUOTA_EXHAUSTED` / `PROVIDER_UNCONFIGURED` 与 buildPlan 抛出的
+    4xx（如 slug 非法）直接丢弃，不白占 3 次 attempt
+  - `ParamDef.multiSegment` + Hono `:name{.+}`：支持含 `/` 的路径参数
+  - 新增 provider `economist`（tier C）：`article/{slug}`，wall 档（24h/7d）、
+    `inline: false`（miss 只入队）、只提取标题与摘要等元数据
+- 离线测试：`vitest-pool-workers` + `@msw/cloudflare` 出站拦截，129 个用例全离线
 - VitePress 文档站（首页/快速上手/数据源/限流/错误/合规 + 参考页），部署到同一 Worker 的 `/docs`
 
 ### Fixed

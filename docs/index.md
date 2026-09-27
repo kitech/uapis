@@ -39,6 +39,7 @@ hero:
 | github | `repo/{owner}/{repo}`、`search/repositories`、`user/{login}` | 无（`gh.token` 可选） |
 | devto | `articles`、`article/{id}`、`user/{username}` | 无 |
 | arxiv | `search`、`paper/{id}` | 无 |
+| economist | `article/{slug}` | `zenrows.key` 或 `jina.key`（付费通道，任一即可） |
 
 完整参数见 [数据源与凭据](/guide/providers) 或 `/openapi.json`。
 

@@ -153,7 +153,12 @@ const CHANNEL_SETTING: Record<ProxyChannel, string> = {
   jina: 'jina.key',
 }
 
-/** 通道选择：显式 > ZenRows（消耗 credits）> Jina（key 提额） */
+/**
+ * 通道选择：显式 hint > `proxy.mode` 指定 > ZenRows（有 key 且有 credits）> Jina。
+ *
+ * `proxy.mode` 的 off / auto 都表示"没有偏好"——它只对声明了 `proxy` 的端点有意义，
+ * 不会让某个源绕过付费通道直连。写成 zenrows / jina 则是强制走那一条（没 key 就 503）。
+ */
 export async function pickChannel(env: Env, hint?: ProxyChannel): Promise<ProxyChannel> {
   if (hint !== undefined) return hint
   const mode = (await getSetting(env, 'proxy.mode')).toLowerCase()

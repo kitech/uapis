@@ -14,11 +14,22 @@ export interface ParamDef {
   maxLength?: number
   minimum?: number
   maximum?: number
+  /**
+   * 仅 path 参数：值允许包含 `/`（如付费墙文章的 `finance/2026/01/01/slug`）。
+   * 路由生成时对应 Hono 的 `:name{.+}`，单段参数默认不跨 `/`。
+   */
+  multiSegment?: boolean
 }
 
 export interface ProxySpec {
   /** 固定的目标 host，仍然要过白名单 */
   host: string
+  /**
+   * 通道偏好（可选）。留空表示"按可用性自动选"：ZenRows 有额度就用 ZenRows，
+   * 否则退到 Jina。写死某条通道会关掉这个 fallback。
+   * 注意：真正计费的是 `runtime.buildPlan()` 返回的 `UpstreamPlan.proxy.channel`，
+   * 这个字段只做声明与自检。
+   */
   channel?: ProxyChannel
   mode?: ProxyMode
 }
@@ -57,12 +68,23 @@ export interface ProviderDef {
   displayName: string
   tier: Tier
   auth?: AuthDef
-  /** 白名单 host，必须与 settings.upstream.allowlist 一致 */
+  /** 本 provider 允许接触的目标 host；proxy.host 必须是其中之一 */
   hosts: string[]
+  /**
+   * 真正走网络的那几个 host，必须与 settings.upstream.allowlist 一致。
+   * 只走付费通道的 provider 用它：目标 host（如 medium.com）我们并不直连，
+   * 出口只有代理服务自己，校验白名单时必须按出口算而不是按目标算。
+   */
+  egressHosts?: string[]
   minIntervalMs: number
   /** 需要覆盖默认 UA 的场景说明；实际 UA 由 fetcher 强制注入 */
   uaNote?: string
   parseCostMs: number
+  /**
+   * "配了任意一个 setting 才算可用"。tier C 走付费通道时用：ZenRows / Jina
+   * 两条通道任一可用即可，全空说明这个 provider 现在根本没法回源。
+   */
+  requiredAnyOf?: string[]
   attribution?: string
   tos?: string
   limits?: string
@@ -95,6 +117,11 @@ export function allEndpoints(): { provider: ProviderDef; endpoint: EndpointDef }
   return flat
 }
 
+/** 出口白名单校验用哪组 host：只走代理的 provider 用 egressHosts */
+export function egressHostsOf(provider: ProviderDef): string[] {
+  return provider.egressHosts ?? provider.hosts
+}
+
 /** 上线前的自检：operationId 唯一、host 已进白名单、路径参数与声明一致 */
 export function validateRegistry(
   allowlist: string[],
@@ -119,11 +146,34 @@ export function validateRegistry(
       for (const name of inPath) {
         if (!declared.has(name)) problems.push(`${id}: path 中的 ${name} 未声明`)
       }
-      if (endpoint.proxy !== undefined && !provider.hosts.includes(endpoint.proxy.host)) {
-        problems.push(`${id}: proxy.host 未包含在 provider.hosts 中`)
+      if (endpoint.proxy !== undefined) {
+        if (!provider.hosts.includes(endpoint.proxy.host)) {
+          problems.push(`${id}: proxy.host 未包含在 provider.hosts 中`)
+        }
+        // 代理端点不能内联回源：同步路径上烧 credits 没有闸门保护，
+        // 一次突发就能把当天的付费额度打光
+        if (endpoint.inline) {
+          problems.push(`${id}: 走付费通道的端点不允许 inline（会绕过额度节流）`)
+        }
+        if (endpoint.passthrough && endpoint.resource === 'wall') {
+          problems.push(`${id}: 付费墙源不应使用 passthrough（上游是 HTML/Markdown）`)
+        }
+      }
+      if (provider.tier === 'C' && endpoint.proxy === undefined) {
+        problems.push(`${id}: tier C 端点必须声明 proxy，不允许免费绕过`)
+      }
+      if (provider.tier === 'C' && (provider.requiredAnyOf ?? []).length === 0) {
+        problems.push(`${provider.name}: tier C 必须声明 requiredAnyOf（可用通道的 setting）`)
+      }
+      // multiSegment 会让 `:name` 变成 `:name{.+}`，值里能带 `/`；
+      // 这类参数必须自己校验（`..`、query 注入），路由层只管非空
+      for (const param of endpoint.params) {
+        if (param.multiSegment === true && param.in !== 'path') {
+          problems.push(`${id}: multiSegment 只适用于 path 参数（${param.name}）`)
+        }
       }
     }
-    for (const host of provider.hosts) {
+    for (const host of egressHostsOf(provider)) {
       if (!allowlist.includes(host)) problems.push(`${provider.name}: host ${host} 不在白名单中`)
     }
   }

@@ -9,6 +9,7 @@ import { getIntSetting, getSetting } from '../core/settings'
 import { queueBudget, readAllQuota, readCredits } from '../core/credits'
 import { readGate } from '../core/gate'
 import { readStats } from '../core/stats'
+import type { ProxyChannel } from '../core/fetcher'
 
 const meta = new Hono<AppEnv>()
 
@@ -49,11 +50,37 @@ meta.get('/status', async (c) => {
       const configured =
         !needsKey ? true : (await getSetting(c.env, provider.auth!.settingKey)).length > 0
       const credits = needsKey ? await readCredits(c.env, provider.name, 'default') : null
+
+      // tier C 没有单一 auth key，而是"任一付费通道可用即可"；
+      // /status 要能一眼看出当前到底配了哪条通道、各剩多少 credits
+      const channelKeys = provider.requiredAnyOf ?? []
+      const channels =
+        channelKeys.length === 0
+          ? null
+          : await Promise.all(
+              channelKeys.map(async (key) => {
+                const channelCredits = await readCredits(c.env, 'proxy', channelOf(key))
+                return {
+                  setting: key,
+                  configured: (await getSetting(c.env, key)).length > 0,
+                  credits: {
+                    used: channelCredits.used,
+                    limit: channelCredits.limit,
+                    remaining: Number.isFinite(channelCredits.remaining)
+                      ? channelCredits.remaining
+                      : null,
+                  },
+                }
+              }),
+            )
+      const channelReady =
+        channelKeys.length === 0 || (channels ?? []).some((item) => item.configured)
+
       return {
         name: provider.name,
         display_name: provider.displayName,
         tier: provider.tier,
-        status: configured ? 'active' : 'unconfigured',
+        status: configured && channelReady ? 'active' : 'unconfigured',
         endpoints: provider.endpoints.length,
         min_interval_ms: provider.minIntervalMs,
         attribution: provider.attribution ?? null,
@@ -62,6 +89,7 @@ meta.get('/status', async (c) => {
         auth: provider.auth === undefined ? null : provider.auth.settingKey,
         auth_required: needsKey,
         auth_optional: provider.auth !== undefined && !needsKey,
+        channels,
         credits:
           credits === null
             ? null
@@ -133,3 +161,8 @@ meta.get('/llms.txt', (c) => {
 })
 
 export default meta
+
+/** `zenrows.key` → `zenrows`；`proxy` 维度的额度按通道名记账 */
+function channelOf(settingKey: string): ProxyChannel {
+  return settingKey.split('.')[0] as ProxyChannel
+}

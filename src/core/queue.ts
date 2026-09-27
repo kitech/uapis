@@ -1,4 +1,5 @@
 import { runtimeFor } from '../providers'
+import { ApiError, ErrorCode } from './errors'
 import { consumeQueueSlot, queueBudget } from './credits'
 import { logError } from './logger'
 import { refreshTarget } from './refresh'
@@ -84,8 +85,7 @@ export async function handleMessage(
   try {
     const outcome = await refreshTarget(env, parsed.p, target, { skipGate: false })
     if (outcome.error !== undefined) {
-      const retryable = outcome.error.status === 503 || outcome.error.status === 504
-      if (retryable) {
+      if (shouldRetry(outcome.error)) {
         if (message.attempts < 3) {
           stats.retried += 1
           message.retry({ delaySeconds: Math.min(60, 5 * message.attempts) })
@@ -108,7 +108,9 @@ export async function handleMessage(
       key: parsed.k,
       message: error instanceof Error ? error.message : String(error),
     })
-    if (message.attempts < 3) {
+    // buildPlan 抛出的 ApiError（如 slug 非法）同样走这套判断
+    const retryable = error instanceof ApiError ? shouldRetry(error) : true
+    if (retryable && message.attempts < 3) {
       stats.retried += 1
       message.retry({ delaySeconds: Math.min(60, 5 * message.attempts) })
       return
@@ -127,4 +129,20 @@ export async function handleQueueBatch(
     await handleMessage(message, env, stats)
   }
   return stats
+}
+
+/**
+ * 只重试"等一会可能会好"的错误：闸门冷却、临时上游故障。
+ *
+ * 额度用尽、没配通道、参数非法都重试不了——tier C 尤其明显，重试不会让
+ * ZenRows 的额度长回来，只会白白占掉 3 次 attempt 和队列操作费。
+ */
+function shouldRetry(error: ApiError): boolean {
+  if (
+    error.code === ErrorCode.QuotaExhausted ||
+    error.code === ErrorCode.ProviderUnconfigured
+  ) {
+    return false
+  }
+  return error.status === 503 || error.status === 504
 }
