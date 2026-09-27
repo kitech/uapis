@@ -1,0 +1,46 @@
+{
+  "name": "uapis",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "部署在单个 Cloudflare Worker 上的国外站点聚合 API（免费额度内）",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build:docs": "vitepress build docs && node scripts/stage-docs.mjs",
+    "dev:docs": "vitepress dev docs",
+    "deploy": "npm run build:docs && wrangler deploy",
+    "deploy:dry": "npm run build:docs && wrangler deploy --dry-run --outdir=dist",
+    "cf:typegen": "wrangler types",
+    "db:migrate:local": "wrangler d1 migrations apply uapis --local",
+    "db:migrate": "wrangler d1 migrations apply uapis --remote",
+    "db:seed:local": "wrangler d1 execute uapis --local --file=./migrations/seed.sql"
+  },
+  "dependencies": {
+    "hono": "^4.13.9"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
+    "@msw/cloudflare": "^0.1.0",
+    "@types/node": "^24.19.0",
+    "@vitest/runner": "^4.1.11",
+    "@vitest/snapshot": "^4.1.11",
+    "typescript": "^5.9.3",
+    "vitepress": "^1.6.4",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.141.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true,
+    "esbuild@0.21.5": true,
+    "workerd@1.20260815.1": true,
+    "workerd@1.20260925.1": true,
+    "msw@2.15.0": true
+  }
+}

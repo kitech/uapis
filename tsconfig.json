@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "lib": ["ES2023"],
+    "types": ["@cloudflare/vitest-pool-workers", "node"],
+    "strict": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "noEmit": true,
+    "allowJs": false
+  },
+  "include": [
+    "worker-configuration.d.ts",
+    "src/**/*.ts",
+    "test/**/*.ts",
+    "docs/.vitepress/**/*.ts",
+    "scripts/**/*.mjs"
+  ],
+  "exclude": ["node_modules", "dist", ".assets", "docs/.vitepress/dist", ".wrangler"]
+}

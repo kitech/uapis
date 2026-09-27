@@ -1,0 +1,50 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "uapis",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": [],
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": {
+    "enabled": true
+  },
+  "assets": {
+    "directory": ".assets",
+    "not_found_handling": "none"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "uapis",
+      "database_id": "00000000000000000000000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "REFRESH",
+        "queue": "uapis-refresh"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "uapis-refresh",
+        "max_batch_size": 1,
+        "max_batch_timeout": 5,
+        "max_retries": 3
+      }
+    ]
+  },
+  "triggers": {
+    "crons": ["7 */2 * * *", "*/30 * * * *"]
+  },
+  "limits": {
+    "subrequests": 40
+  },
+  "vars": {
+    "SITE_NAME": "uapis",
+    "SITE_URL": "https://uapis.example.workers.dev"
+  }
+}
