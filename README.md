@@ -18,7 +18,7 @@
   Queues 1 万 operations/天、Workers Logs 20 万 events/天。设计目标见
   [docs/reference/design-decisions.md](docs/reference/design-decisions.md)
 - 固定上游 host 白名单 + 不可覆盖的诚实 UA，**不是**开放代理
-- 已接入：Hacker News（零 key）、Stack Exchange（需 `se.key`）；registry 化接入，更多源见路线图
+- 已接入 13 个端点：Hacker News 6 个（零 key）、Stack Exchange 7 个（除 `sites` 外需 `se.key`）
 
 ## 本地开发
 
@@ -34,7 +34,7 @@ npm run dev                         # wrangler dev
 
 ```bash
 npm run typecheck
-npm test                            # vitest-pool-workers + MSW 出站拦截，全离线（72 个用例）
+npm test                            # vitest-pool-workers + MSW 出站拦截，全离线（88 个用例）
 npm run deploy:dry                  # 构建文档并 dry-run，产物需 < 64MiB
 ```
 
@@ -77,7 +77,7 @@ npm run deploy:dry                  # 构建文档并 dry-run，产物需 < 64Mi
 
 ## 路线
 
-P0 骨架（已完成）→ P1 Stack Overflow/HN 完善与分页 → P2 零 key 源批量接入 →
+P0 骨架（已完成）→ P1 Stack Exchange/HN 完善与分页（已完成）→ P2 零 key 源批量接入 →
 P3 付费墙源（ZenRows + Jina 双通道）→ P4 管理与可观测 → P5 打磨发布。
 
 ## License

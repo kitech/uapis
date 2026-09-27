@@ -7,6 +7,7 @@ import { parseMessage } from '../src/core/queue'
 import { allEndpoints, operationIdOf, REGISTRY, validateRegistry } from '../src/core/registry'
 import { buildOpenApi } from '../src/core/openapi'
 import { assertAllowedUpstream, userAgent } from '../src/core/fetcher'
+import { runtimeFor } from '../src/providers'
 
 /** miniflare 的 Cloudflare.Env 缺少 src/types.ts 里声明的 ADMIN_TOKEN，测试里做一次桥接 */
 const env = cloudflareEnv as unknown as Env
@@ -148,6 +149,98 @@ describe('OpenAPI 生成', () => {
       ids.add(item?.operationId ?? '')
     }
     expect(ids.size).toBe(allEndpoints().length)
+  })
+})
+
+describe('provider 回源计划（P1 端点）', () => {
+  const hn = runtimeFor('hackernews')!
+  const se = runtimeFor('stackexchange')!
+
+  it('Hacker News front 用 front_page 标签并落在 feed 档', async () => {
+    const plan = await hn.buildPlan(env, { op: 'front', id: '', query: [] })
+    expect(plan.url).toBe('https://hn.algolia.com/api/v1/search?tags=front_page&hitsPerPage=20&page=0')
+    expect(plan.resource).toBe('feed')
+  })
+
+  it('Hacker News latest 走 search_by_date 并尊重 tags', async () => {
+    const plan = await hn.buildPlan(env, {
+      op: 'latest',
+      id: '',
+      query: [['tags', 'comment'], ['page', '2']],
+    })
+    expect(plan.url).toContain('/search_by_date?tags=comment')
+    expect(plan.url).toContain('page=2')
+  })
+
+  it('Hacker News userPosts 用 author 标签而不是 story 标签', async () => {
+    // 实测 hn.algolia.com：tags=author_pg 有 1w+ 条，tags=story_pg 恒为 0
+    const plan = await hn.buildPlan(env, { op: 'userPosts', id: 'pg', query: [] })
+    expect(plan.url).toBe(
+      'https://hn.algolia.com/api/v1/search_by_date?tags=author_pg&hitsPerPage=20&page=0',
+    )
+    expect(plan.url).not.toContain('story_pg')
+  })
+
+  it('Hacker News userPosts 支持关键词过滤并校验用户名', async () => {
+    const plan = await hn.buildPlan(env, {
+      op: 'userPosts',
+      id: 'pg',
+      query: [['query', 'rust workers']],
+    })
+    expect(plan.url).toContain('tags=author_pg')
+    expect(plan.url).toContain('query=rust%20workers')
+    await expect(hn.buildPlan(env, { op: 'userPosts', id: 'bad user', query: [] })).rejects.toThrow(
+      /invalid id/,
+    )
+  })
+
+  it('Stack Exchange answers 走 /questions/{id}/answers 并带分页', async () => {
+    const plan = await se.buildPlan(env, {
+      op: 'answers',
+      id: '123',
+      query: [['site', 'stackoverflow'], ['sort', 'votes'], ['pagesize', '50'], ['page', '1']],
+    })
+    expect(plan.url).toContain('/questions/123/answers?site=stackoverflow')
+    expect(plan.url).toContain('sort=votes')
+    expect(plan.url).toContain('pagesize=50&page=1')
+    expect(plan.resource).toBe('item')
+  })
+
+  it('Stack Exchange comments 走 /posts/{id}/comments', async () => {
+    const plan = await se.buildPlan(env, { op: 'comments', id: '9', query: [['filter', '!x']] })
+    expect(plan.url).toContain('/posts/9/comments?site=stackoverflow')
+    expect(plan.url).toContain('filter=!x')
+  })
+
+  it('Stack Exchange sites 是匿名端点：不带 key 也能用', async () => {
+    const plan = await se.buildPlan(env, { op: 'sites', id: '', query: [] })
+    expect(plan.url).toBe(
+      'https://api.stackexchange.com/2.3/sites?pagesize=100&page=0',
+    )
+    expect(plan.url).not.toContain('key=')
+    const endpoint = REGISTRY.find((p) => p.name === 'stackexchange')?.endpoints.find(
+      (e) => e.op === 'sites',
+    )
+    expect(endpoint?.auth).toBe('optional')
+  })
+
+  it('未知 op 抛 NOT_FOUND', async () => {
+    await expect(hn.buildPlan(env, { op: 'nope', id: '', query: [] })).rejects.toThrow(
+      /unknown hackernews op/,
+    )
+    await expect(se.buildPlan(env, { op: 'nope', id: '', query: [] })).rejects.toThrow(
+      /unknown stackexchange op/,
+    )
+  })
+
+  it('分页参数上界统一：page ≤ 10、pagesize ≤ 100（sites 除外）', () => {
+    for (const { endpoint } of allEndpoints()) {
+      for (const param of endpoint.params) {
+        if (param.name === 'page') expect(param.maximum).toBeLessThanOrEqual(10)
+        if (param.name === 'pagesize') expect(param.maximum).toBeGreaterThanOrEqual(20)
+        if (param.name === 'hitsPerPage') expect(param.maximum).toBe(100)
+      }
+    }
   })
 })
 

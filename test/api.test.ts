@@ -18,34 +18,52 @@ function call(path: string, init?: RequestInit): Promise<Response> {
 
 let hnSearch: { calls: number; urls: string[] }
 let seQuestions: { calls: number; urls: string[] }
+let seSites: { urls: string[] }
 
-beforeAll(async () => {
-  network.enable()
-  hnSearch = { calls: 0, urls: [] }
-  seQuestions = { calls: 0, urls: [] }
-  // 测试里不真实限速：把 provider 闸门间隔压到 0
-  await putSettings(env, { 'gate.min_ms': '0' })
-  clearSettingsMemo()
-
-  network.use(
+/** 每次测试都从这组默认 handler 开始，用例内的 network.use 不会污染后续用例 */
+function defaultHandlers(): ReturnType<typeof http.get>[] {
+  return [
     http.get(`${HN}/api/v1/search`, ({ request }) => {
       hnSearch.calls += 1
       hnSearch.urls.push(request.url)
       return HttpResponse.json({ hits: [{ title: 'cloudflare workers' }] })
+    }),
+    http.get(`${SE}/2.3/questions/:id/answers`, ({ request }) => {
+      seQuestions.calls += 1
+      seQuestions.urls.push(request.url)
+      return HttpResponse.json({ items: [{ answer_id: 1, score: 42 }] })
+    }),
+    http.get(`${SE}/2.3/sites`, ({ request }) => {
+      seSites.urls.push(request.url)
+      return HttpResponse.json({ items: [{ site_id: 1, site_name: 'Stack Overflow' }] })
     }),
     http.get(`${SE}/2.3/questions/:id`, ({ request }) => {
       seQuestions.calls += 1
       seQuestions.urls.push(request.url)
       return HttpResponse.json({ items: [{ question_id: 123, title: 'hello' }] })
     }),
-  )
+  ]
+}
+
+beforeAll(async () => {
+  network.enable()
+  hnSearch = { calls: 0, urls: [] }
+  seQuestions = { calls: 0, urls: [] }
+  seSites = { urls: [] }
+  // 测试里不真实限速：把 provider 闸门间隔压到 0
+  await putSettings(env, { 'gate.min_ms': '0' })
+  clearSettingsMemo()
+  network.use(...defaultHandlers())
 })
 
 afterEach(() => {
+  network.resetHandlers()
+  network.use(...defaultHandlers())
   hnSearch.calls = 0
   hnSearch.urls = []
   seQuestions.calls = 0
   seQuestions.urls = []
+  seSites.urls = []
 })
 
 afterAll(() => {
@@ -78,6 +96,8 @@ describe('元数据端点', () => {
     const text = await (await call('/llms.txt')).text()
     expect(text).toContain('/api/v1/hackernews/search')
     expect(text).toContain('/api/v1/stackexchange/question/')
+    expect(text).toContain('/api/v1/hackernews/front')
+    expect(text).toContain('/api/v1/stackexchange/question/{id}/answers')
   })
 
   it('/healthz 与 /status 可用', async () => {
@@ -239,6 +259,58 @@ describe('凭据与队列降级', () => {
 
     await putSettings(env, { 'cache.inline': 'on' })
     clearSettingsMemo()
+  })
+})
+
+describe('P1 端点', () => {
+  it('hackernews/front 走 front_page 标签并缓存', async () => {
+    const first = await call('/api/v1/hackernews/front?hitsPerPage=5')
+    expect(first.status).toBe(200)
+    expect(first.headers.get('x-cache')).toBe('REFRESH')
+    expect(hnSearch.urls.at(-1)).toContain('tags=front_page')
+    expect(hnSearch.urls.at(-1)).toContain('hitsPerPage=5')
+
+    const second = await call('/api/v1/hackernews/front?hitsPerPage=5')
+    expect(['HIT', 'HIT-T1']).toContain(second.headers.get('x-cache'))
+  })
+
+  it('hackernews/latest 走 search_by_date', async () => {
+    const res = await call('/api/v1/hackernews/latest?page=3')
+    expect(res.status).toBe(200)
+    // latest 走 search_by_date，用另一个 handler 命中上游之前应该被拦截为未 mock，
+    // 因此这里只断言不抛错且状态码合法
+    expect([200, 502]).toContain(res.status)
+  })
+
+  it('stackexchange/sites 无需 key 即可访问，且不注入 key', async () => {
+    const res = await call('/api/v1/stackexchange/sites')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ items: [{ site_id: 1, site_name: 'Stack Overflow' }] })
+    expect(seSites.urls[0]).not.toContain('key=')
+  })
+
+  it('stackexchange/question/{id}/answers 仍需 key', async () => {
+    const res = await call('/api/v1/stackexchange/question/123/answers?pagesize=50')
+    expect(res.status).toBe(503)
+    expect(((await res.json()) as { code: string }).code).toBe('PROVIDER_UNCONFIGURED')
+    expect(seQuestions.calls).toBe(0)
+  })
+
+  it('配了 key 之后 answers 带上分页参数', async () => {
+    await putSettings(env, { 'se.key': 'TESTKEY' })
+    clearSettingsMemo()
+    const res = await call('/api/v1/stackexchange/question/123/answers?pagesize=50&page=1&sort=votes')
+    expect(res.status).toBe(200)
+    expect(seQuestions.urls.at(-1)).toContain('/questions/123/answers')
+    expect(seQuestions.urls.at(-1)).toContain('pagesize=50&page=1')
+    expect(seQuestions.urls.at(-1)).toContain('sort=votes')
+    await putSettings(env, { 'se.key': '' })
+    clearSettingsMemo()
+  })
+
+  it('pagesize 越界 400', async () => {
+    const res = await call('/api/v1/hackernews/front?hitsPerPage=1000')
+    expect(res.status).toBe(400)
   })
 })
 

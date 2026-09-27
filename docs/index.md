@@ -30,6 +30,15 @@ hero:
 
 > 本项目与 uapis.cn 无任何关联，是从零实现的同类项目。
 
+## 已接入的接口
+
+| provider | 端点 | 凭据 |
+| --- | --- | --- |
+| hackernews | `search`、`item/{id}`、`user/{id}`、`front`、`latest`、`user/{id}/posts` | 无 |
+| stackexchange | `question/{id}`、`search`、`user/{id}`、`tags`、`question/{id}/answers`、`question/{id}/comments`、`sites` | `se.key`（`sites` 除外） |
+
+完整参数见 [数据源与凭据](/guide/providers) 或 `/openapi.json`。
+
 ## 快速预览
 
 ```bash

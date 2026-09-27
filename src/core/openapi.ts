@@ -56,6 +56,7 @@ export function buildOpenApi(siteUrl: string): Record<string, unknown> {
         name: provider.name,
         tier: provider.tier,
         auth: provider.auth === undefined ? null : provider.auth.settingKey,
+        endpoint_auth: endpoint.auth ?? 'required',
         min_interval_ms: provider.minIntervalMs,
         attribution: provider.attribution ?? null,
         tos: provider.tos ?? null,

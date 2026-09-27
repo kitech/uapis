@@ -94,7 +94,7 @@ export const def: ProviderDef = {
       summary: '指定用户的最新条目（分页）',
       params: [
         { name: 'id', in: 'path', type: 'string', required: true, description: 'HN 用户 ID' },
-        { name: 'tags', in: 'query', type: 'string', required: false, description: 'Algolia tags，默认 story', default: 'story' },
+        { name: 'query', in: 'query', type: 'string', required: false, description: '在该用户的条目里再做关键词过滤' },
         { name: 'hitsPerPage', in: 'query', type: 'integer', required: false, description: '每页条数，1-100', default: '20', minimum: 1, maximum: 100 },
         { name: 'page', in: 'query', type: 'integer', required: false, description: '页码，0 起', default: '0', minimum: 0, maximum: 10 },
       ],
@@ -145,11 +145,15 @@ export const runtime: ProviderRuntime = {
       }
       case 'userPosts': {
         const id = requirePattern(target.id, USER_PATTERN, 'id')
+        // Algolia 里“某人的全部条目”是 author_<id> 标签；story_<id> 是“第 1263 号帖子”这种主键标签，
+        // 用它当作者过滤会永远返回 0 条（已实测）
         const query: [string, string][] = [
-          ['tags', `${queryValue(target, 'tags') ?? 'story'}_${id}`],
+          ['tags', `author_${id}`],
           ['hitsPerPage', queryValue(target, 'hitsPerPage') ?? '20'],
           ['page', queryValue(target, 'page') ?? '0'],
         ]
+        const text = queryValue(target, 'query')
+        if (text !== undefined && text.length > 0) query.push(['query', text])
         return { url: `${API}/search_by_date?${toQuery(query)}`, resource: 'feed' }
       }
       default:
