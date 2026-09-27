@@ -20,6 +20,9 @@ const DEVTO = 'https://dev.to/api'
 const ARXIV = 'https://export.arxiv.org'
 const ZENROWS = 'https://api.zenrows.com'
 const JINA = 'https://r.jina.ai'
+const LOBSTERS = 'https://lobste.rs'
+const ITUNES = 'https://itunes.apple.com'
+const CROSSREF = 'https://api.crossref.org'
 
 const ECONOMIST_HTML = `<html><head><title>Fallback</title>
   <meta property="og:title" content="Paywalled &amp; locked">
@@ -58,6 +61,9 @@ let devto: { urls: string[] }
 let arxiv: { urls: string[] }
 let zenrows: { urls: string[] }
 let jina: { urls: string[] }
+let lobsters: { urls: string[] }
+let itunes: { urls: string[] }
+let crossref: { urls: string[] }
 
 /** 每次测试都从这组默认 handler 开始，用例内的 network.use 不会污染后续用例 */
 function defaultHandlers(): ReturnType<typeof http.get>[] {
@@ -66,6 +72,12 @@ function defaultHandlers(): ReturnType<typeof http.get>[] {
       hnSearch.calls += 1
       hnSearch.urls.push(request.url)
       return HttpResponse.json({ hits: [{ title: 'cloudflare workers' }] })
+    }),
+    // hackernews/latest 之前没 mock，靠真实网络才 200，CI 无网就 502
+    http.get(`${HN}/api/v1/search_by_date`, ({ request }) => {
+      hnSearch.calls += 1
+      hnSearch.urls.push(request.url)
+      return HttpResponse.json({ hits: [{ title: 'latest story' }] })
     }),
     http.get(`${SE}/2.3/questions/:id/answers`, ({ request }) => {
       seQuestions.calls += 1
@@ -113,6 +125,40 @@ function defaultHandlers(): ReturnType<typeof http.get>[] {
       arxiv.urls.push(request.url)
       return new HttpResponse(ARXIV_ATOM, { headers: { 'content-type': 'application/atom+xml' } })
     }),
+    http.get(`${LOBSTERS}/hottest.json`, ({ request }) => {
+      lobsters.urls.push(request.url)
+      return HttpResponse.json([{ short_id: 'uvmajz', title: 'A hot story', tags: ['rust'] }])
+    }),
+    http.get(`${LOBSTERS}/newest.json`, ({ request }) => {
+      lobsters.urls.push(request.url)
+      return HttpResponse.json([{ short_id: 'newest1', title: 'A newest story', tags: [] }])
+    }),
+    http.get(`${LOBSTERS}/t/:tag.json`, ({ request, params }) => {
+      lobsters.urls.push(request.url)
+      return HttpResponse.json([{ short_id: 'tagged1', title: `tagged ${String(params.tag)}` }])
+    }),
+    http.get(`${LOBSTERS}/s/:id.json`, ({ request, params }) => {
+      lobsters.urls.push(request.url)
+      return HttpResponse.json({ short_id: params.id, title: 'A single story', comments: [] })
+    }),
+    http.get(`${ITUNES}/search`, ({ request }) => {
+      itunes.urls.push(request.url)
+      return HttpResponse.json({ resultCount: 1, results: [{ collectionId: 1765470838, kind: 'podcast' }] })
+    }),
+    http.get(`${ITUNES}/lookup`, ({ request }) => {
+      itunes.urls.push(request.url)
+      return HttpResponse.json({ resultCount: 1, results: [{ collectionId: 1765470838 }] })
+    }),
+    http.get(`${CROSSREF}/works`, ({ request }) => {
+      crossref.urls.push(request.url)
+      return HttpResponse.json({ status: 'ok', 'message-type': 'work-list', items: [] })
+    }),
+    // DOI 天然多段，MSW 的 `:doi{.+}` 匹配不到多段路径，用正则整段匹配
+    http.get(/api\.crossref\.org\/works\/.+/, ({ request }) => {
+      crossref.urls.push(request.url)
+      const doi = new URL(request.url).pathname.replace('/works/', '')
+      return HttpResponse.json({ status: 'ok', message: { DOI: doi, title: ['A study'] } })
+    }),
   ]
 }
 
@@ -126,6 +172,9 @@ beforeAll(async () => {
   arxiv = { urls: [] }
   zenrows = { urls: [] }
   jina = { urls: [] }
+  lobsters = { urls: [] }
+  itunes = { urls: [] }
+  crossref = { urls: [] }
   // 测试里不真实限速：把 provider 闸门间隔压到 0
   await putSettings(env, { 'gate.min_ms': '0' })
   clearSettingsMemo()
@@ -146,6 +195,9 @@ afterEach(() => {
   arxiv.urls = []
   zenrows.urls = []
   jina.urls = []
+  lobsters.urls = []
+  itunes.urls = []
+  crossref.urls = []
 })
 
 // 限流是 isolate 内的固定窗口计数器，不清的话用例数一多就会互相踩出 429
@@ -195,10 +247,13 @@ describe('元数据端点', () => {
     }
     expect(body.providers.map((p) => p.name).sort()).toEqual([
       'arxiv',
+      'crossref',
       'devto',
       'economist',
       'github',
       'hackernews',
+      'itunes',
+      'lobsters',
       'stackexchange',
     ])
     expect(body.providers.find((p) => p.name === 'stackexchange')?.status).toBe('unconfigured')
@@ -499,6 +554,190 @@ describe('P2 零 key 源', () => {
   })
 })
 
+describe('P4 新增零 key 源', () => {
+  it('lobsters 四个端点都映射到官方 JSON 路径并透传', async () => {
+    for (const [path, upstream] of [
+      ['/api/v1/lobsters/hot', 'https://lobste.rs/hottest.json'],
+      ['/api/v1/lobsters/newest', 'https://lobste.rs/newest.json'],
+      ['/api/v1/lobsters/tag/rust', 'https://lobste.rs/t/rust.json'],
+    ] as const) {
+      const res = await call(path)
+      expect(res.status).toBe(200)
+      expect(lobsters.urls.at(-1)).toBe(upstream)
+    }
+    const body = (await (await call('/api/v1/lobsters/tag/rust')).json()) as {
+      short_id: string
+      title: string
+    }[]
+    expect(body[0]?.short_id).toBe('tagged1')
+  })
+
+  it('lobsters 单个故事走 /s/{short_id}.json', async () => {
+    const res = await call('/api/v1/lobsters/story/uvmajz')
+    expect(res.status).toBe(200)
+    expect(lobsters.urls.at(-1)).toBe('https://lobste.rs/s/uvmajz.json')
+  })
+
+  it('lobsters 非法 tag/故事 id 在回源前 400', async () => {
+    const before = lobsters.urls.length
+    for (const path of [
+      '/api/v1/lobsters/tag/Rust',
+      '/api/v1/lobsters/tag/a%2Fb',
+      '/api/v1/lobsters/story/AB!',
+      '/api/v1/lobsters/story/..%2F..%2Fadmin',
+    ]) {
+      const res = await call(path)
+      expect(res.status).toBe(400)
+      expect(((await res.json()) as { code: string }).code).toBe('INVALID_PARAMETER')
+    }
+    expect(lobsters.urls.length).toBe(before)
+  })
+
+  it('itunes search 只放行白名单参数，term 里的 & 被编码', async () => {
+    const res = await call(
+      '/api/v1/itunes/search?term=AT%26T&media=podcast&country=JP&limit=50&offset=100&evil=1',
+    )
+    expect(res.status).toBe(400)
+    expect(itunes.urls).toHaveLength(0)
+
+    const ok = await call('/api/v1/itunes/search?term=AT%26T&media=podcast&country=JP&limit=50&offset=100')
+    expect(ok.status).toBe(200)
+    expect(itunes.urls.at(-1)).toBe(
+      'https://itunes.apple.com/search?term=AT%26T&media=podcast&country=JP&limit=50&offset=100',
+    )
+    const body = (await ok.json()) as { resultCount: number; results: { collectionId: number }[] }
+    expect(body.resultCount).toBe(1)
+    expect(body.results[0]?.collectionId).toBe(1765470838)
+  })
+
+  it('itunes 非法 media / 缺 term / 非法 id 都是 400，不回源', async () => {
+    const before = itunes.urls.length
+    const cases = [
+      '/api/v1/itunes/search?term=x&media=book',
+      '/api/v1/itunes/search',
+      '/api/v1/itunes/search?term=a%3Db',
+      '/api/v1/itunes/lookup?id=1%20OR%201',
+      '/api/v1/itunes/lookup',
+      '/api/v1/itunes/search?term=x&limit=500',
+    ]
+    for (const path of cases) {
+      const res = await call(path)
+      expect(res.status).toBe(400)
+      expect(((await res.json()) as { code: string }).code).toBe('INVALID_PARAMETER')
+    }
+    expect(itunes.urls.length).toBe(before)
+  })
+
+  it('itunes lookup 按 id 查，且二次请求命中缓存', async () => {
+    const first = await call('/api/v1/itunes/lookup?id=1765470838&entity=podcastEpisode')
+    expect(first.status).toBe(200)
+    expect(itunes.urls.at(-1)).toBe(
+      'https://itunes.apple.com/lookup?id=1765470838&country=US&limit=20&entity=podcastEpisode',
+    )
+    const hits = itunes.urls.length
+    const second = await call('/api/v1/itunes/lookup?id=1765470838&entity=podcastEpisode')
+    expect(['HIT', 'HIT-T1']).toContain(second.headers.get('x-cache'))
+    expect(itunes.urls.length).toBe(hits)
+  })
+
+  it('crossref search 透传 query/filter/select/sort', async () => {
+    const res = await call(
+      '/api/v1/crossref/search?query=cloudflare%20waf&rows=5&sort=published&order=asc&filter=from-pub-date:2024-01-01&select=DOI,title',
+    )
+    expect(res.status).toBe(200)
+    const url = new URL(crossref.urls.at(-1)!)
+    expect(url.origin + url.pathname).toBe('https://api.crossref.org/works')
+    expect(url.searchParams.get('query')).toBe('cloudflare waf')
+    expect(url.searchParams.get('rows')).toBe('5')
+    expect(url.searchParams.get('order')).toBe('asc')
+    expect(url.searchParams.get('filter')).toBe('from-pub-date:2024-01-01')
+    expect(url.searchParams.get('select')).toBe('DOI,title')
+    expect(url.searchParams.get('mailto')).toBeNull()
+  })
+
+  it('crossref work 的 DOI 含斜杠，多段路由能命中', async () => {
+    const res = await call('/api/v1/crossref/work/10.2172/2407272')
+    expect(res.status).toBe(200)
+    expect(crossref.urls.at(-1)).toBe('https://api.crossref.org/works/10.2172/2407272')
+    const body = (await res.json()) as { message: { DOI: string } }
+    expect(body.message.DOI).toBe('10.2172/2407272')
+  })
+
+  it('crossref.mailto 配了就进 polite pool，配错就当没配', async () => {
+    // 注意：mailto 是服务端设置，不进缓存键，所以要用没被前一个用例缓存过的 DOI，
+    // 否则直接命中缓存、看不到上游 URL 里的 mailto
+    await putSettings(env, { 'crossref.mailto': 'me@example.com' })
+    clearSettingsMemo()
+    const polite = await call('/api/v1/crossref/work/10.1371/journal.pone.0000308')
+    expect(polite.status).toBe(200)
+    expect(crossref.urls.at(-1)).toBe(
+      'https://api.crossref.org/works/10.1371/journal.pone.0000308?mailto=me%40example.com',
+    )
+
+    await putSettings(env, { 'crossref.mailto': 'nope' })
+    clearSettingsMemo()
+    const impolite = await call('/api/v1/crossref/search?query=waf&rows=1')
+    expect(impolite.status).toBe(200)
+    expect(new URL(crossref.urls.at(-1)!).searchParams.get('mailto')).toBeNull()
+
+    await putSettings(env, { 'crossref.mailto': '' })
+    clearSettingsMemo()
+  })
+
+  it('crossref 非法 DOI 与枚举在回源前 400', async () => {
+    const before = crossref.urls.length
+    for (const path of [
+      '/api/v1/crossref/work/11.2172%2F2407272',
+      '/api/v1/crossref/work/10.2172%2F..%2Fadmin',
+      '/api/v1/crossref/work/10.2172%2Fa%20b',
+      '/api/v1/crossref/search?query=x&sort=random',
+      '/api/v1/crossref/search?query=x&select=DOI%7Cscript',
+      '/api/v1/crossref/search',
+    ]) {
+      const res = await call(path)
+      expect(res.status).toBe(400)
+      expect(((await res.json()) as { code: string }).code).toBe('INVALID_PARAMETER')
+    }
+    expect(crossref.urls.length).toBe(before)
+  })
+
+  it('三个新源都是零 key：/status 里 active，且 host 已进白名单', async () => {
+    const status = (await (await call('/status')).json()) as {
+      providers: { name: string; status: string; auth_required?: boolean }[]
+    }
+    for (const name of ['lobsters', 'itunes', 'crossref']) {
+      const entry = status.providers.find((p) => p.name === name)
+      expect(entry?.status).toBe('active')
+      expect(entry?.auth_required).toBe(false)
+    }
+    const admin = (await (await call('/admin/providers', { headers: ADMIN })).json()) as {
+      allowlist: string[]
+    }
+    expect(admin.allowlist).toEqual(
+      expect.arrayContaining(['lobste.rs', 'itunes.apple.com', 'api.crossref.org']),
+    )
+  })
+
+  it('openapi.json 与 llms.txt 覆盖 9 个 provider', async () => {
+    const doc = (await (await call('/openapi.json')).json()) as { paths: Record<string, unknown> }
+    expect(Object.keys(doc.paths)).toEqual(
+      expect.arrayContaining([
+        '/api/v1/lobsters/hot',
+        '/api/v1/lobsters/tag/{tag}',
+        '/api/v1/lobsters/story/{id}',
+        '/api/v1/itunes/search',
+        '/api/v1/itunes/lookup',
+        '/api/v1/crossref/search',
+        '/api/v1/crossref/work/{doi}',
+      ]),
+    )
+    const text = await (await call('/llms.txt')).text()
+    expect(text).toContain('/api/v1/lobsters/hot')
+    expect(text).toContain('/api/v1/itunes/search')
+    expect(text).toContain('/api/v1/crossref/work/')
+  })
+})
+
 describe('P3 付费通道', () => {
   // Miniflare 的本地 queue 会把 read 路径入队的消息真的投递给 worker，且投递是异步的。
   // 所以这里不靠"数组长度等于 N"做断言，而是显式 handleQueueBatch 消费一条自造消息，
@@ -761,7 +1000,7 @@ describe('管理端点', () => {
       body: JSON.stringify({ provider: 'hackernews', op: 'item', id: '42' }),
     })
     const body = (await res.json()) as { key: string; queued: boolean }
-    expect(body.key).toBe('v1:hackernews:item:42:q')
+    expect(body.key).toBe('v3:hackernews:item:item:42:q')
     expect(body.queued).toBe(true)
   })
 

@@ -6,7 +6,7 @@
 | --- | --- | --- | --- |
 | 入口限流 | 按 `cf-connecting-ip` 的固定窗口 | 60 次/分钟 | 隔离实例内存 |
 | provider 闸门 | 上游请求最小间隔 | registry 里每个 provider 自带（当前 300ms） | D1 `gate` 表 |
-| 额度计数 | 每天每个 provider / 队列 / 付费通道的调用次数 | SE 9500、HN 10000、GH 4500、DEV 9000、arXiv 4000、队列 3000、ZenRows 33、Jina 50 | D1 `quota` 表（按天） |
+| 额度计数 | 每天每个 provider / 队列 / 付费通道的调用次数 | SE 9500、HN 10000、GH 4500、DEV 9000、arXiv 4000、lobsters 6000、iTunes 9000、Crossref 5000、队列 3000、ZenRows 33、Jina 50 | D1 `quota` 表（按天） |
 
 三层都可以用 `/admin/settings` 调：
 
@@ -17,6 +17,7 @@
 | `queue.daily_limit` | 队列每日硬上限 |
 | `queue.soft_limit` | 队列软上限，超过后 `/status` 标记 `throttled` |
 | `quota.<provider>.<channel>` | 单 provider 单 channel 的每日额度；`proxy.zenrows` / `proxy.jina` 是付费通道额度 |
+| `crossref.mailto` | 可选，填合法邮箱即带 `mailto` 进 Crossref polite pool；填错当没配 |
 | `cache.soft_rows` | D1 缓存行软上限，超过后只允许覆盖已有行 |
 | `cache.negative_ttl` | 负缓存秒数，默认 21600（6h） |
 
@@ -62,6 +63,12 @@ tier C 源（The Economist）不直连，每次回源都要花钱，所以额度
 `["zenrows.key","jina.key"]`（见 `details.any_of`）。
 
 ## 免费额度边界
+
+> 现状说明：`quota.<provider>.default` 目前是**配额声明**——`/status` 与
+> `/admin/quota` 能读到，付费通道（`quota.proxy.*`）是每次回源真的扣、
+> 扣到 0 就 503。零 key 源（HN / SE / GitHub / DEV / arXiv / 新增三个）还没接上扣减点，
+> 它们真正的保护是 provider 闸门 + 缓存命中率。要不要给它们也加上硬扣减，
+> 属于待定的策略问题：加了会在突发流量下直接 503。
 
 | 资源 | 免费额度 | 本项目的设计目标 |
 | --- | --- | --- |
@@ -112,7 +119,7 @@ tier C 源（The Economist）不直连，每次回源都要花钱，所以额度
 curl -X PUT https://<你的域名>/admin/settings \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"warm.list":"v1:hackernews:item:1:q|hackernews|item:1\nv1:hackernews:item:2:q|hackernews|item:2"}'
+  -d '{"warm.list":"v3:hackernews:item:item:1:q|hackernews|item:1\nv3:hackernews:item:item:2:q|hackernews|item:2"}'
 ```
 
 每条一行 `缓存键|provider|target`，`*/30 * * * *` 的 Cron 会按顺序刷一遍。

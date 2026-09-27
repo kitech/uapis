@@ -13,7 +13,7 @@ import type { Target } from './target'
 import { logError } from './logger'
 
 export function cacheKeyFor(provider: string, resource: Resource, target: Target): string {
-  return buildCacheKey(provider, resource, target.id, target.query)
+  return buildCacheKey(provider, resource, target.op, target.id, target.query)
 }
 
 export interface RefreshOutcome {

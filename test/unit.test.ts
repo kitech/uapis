@@ -26,6 +26,9 @@ const ALLOWLIST = [
   'export.arxiv.org',
   'api.zenrows.com',
   'r.jina.ai',
+  'lobste.rs',
+  'itunes.apple.com',
+  'api.crossref.org',
 ]
 
 describe('错误体与状态码映射', () => {
@@ -74,7 +77,16 @@ describe('错误体与状态码映射', () => {
 
 describe('缓存键', () => {
   it('键结构固定为 v1:provider:resource:id:qhash', () => {
-    expect(buildCacheKey('hackernews', 'item', '123')).toBe('v1:hackernews:item:123:q')
+    expect(buildCacheKey('hackernews', 'item', 'story', '123')).toBe('v3:hackernews:item:story:123:q')
+    // 无路径参数、无 query 的端点（lobsters/hot vs /newest）不能撞键：
+    // 之前 id 都是空串落到 root，newest 会直接吐 hot 的缓存内容
+    expect(buildCacheKey('lobsters', 'feed', 'hot', '')).not.toBe(
+      buildCacheKey('lobsters', 'feed', 'newest', ''),
+    )
+    // id 大小写敏感：tag/Rust 不能命中 tag/rust 的条目
+    expect(buildCacheKey('lobsters', 'feed', 'tag', 'Rust')).not.toBe(
+      buildCacheKey('lobsters', 'feed', 'tag', 'rust'),
+    )
   })
 
   it('query 顺序不影响哈希，未知参数会改变哈希', () => {
@@ -83,7 +95,7 @@ describe('缓存键', () => {
   })
 
   it('id 归一化：去空白、小写、压缩分隔符', () => {
-    expect(sanitizeId('  Foo/Bar  ')).toBe('foo-bar')
+    expect(sanitizeId('  Foo/Bar  ')).toBe('Foo-Bar')
     expect(sanitizeId('--x--')).toBe('x')
   })
 
@@ -409,6 +421,135 @@ describe('arXiv Atom 解析（零依赖、有界）', () => {
   })
 })
 
+describe('P4 新增零 key 源', () => {
+  it('lobsters：官方路径是 hottest/newest，不是 hot/new', async () => {
+    const rt = runtimeFor('lobsters')!
+    expect((await rt.buildPlan(env, { op: 'hot', id: '', query: [] })).url).toBe(
+      'https://lobste.rs/hottest.json',
+    )
+    expect((await rt.buildPlan(env, { op: 'newest', id: '', query: [] })).url).toBe(
+      'https://lobste.rs/newest.json',
+    )
+    expect((await rt.buildPlan(env, { op: 'tag', id: 'rust', query: [] })).url).toBe(
+      'https://lobste.rs/t/rust.json',
+    )
+    expect((await rt.buildPlan(env, { op: 'story', id: 'uvmajz', query: [] })).url).toBe(
+      'https://lobste.rs/s/uvmajz.json',
+    )
+    for (const bad of ['../admin', 'Rust', 'a/b', '', 'a b']) {
+      await expect(rt.buildPlan(env, { op: 'tag', id: bad, query: [] })).rejects.toThrow(
+        /invalid tag/,
+      )
+    }
+    for (const bad of ['../x', 'AB!', 'toolongshortid']) {
+      await expect(rt.buildPlan(env, { op: 'story', id: bad, query: [] })).rejects.toThrow(
+        /invalid id/,
+      )
+    }
+  })
+
+  it('itunes：media 白名单、term/id 校验、offset 而非 page', async () => {
+    const rt = runtimeFor('itunes')!
+    const plan = await rt.buildPlan(env, {
+      op: 'search',
+      id: '',
+      query: [
+        ['term', 'cloudflare'],
+        ['media', 'podcast'],
+        ['country', 'JP'],
+        ['limit', '50'],
+        ['offset', '100'],
+      ],
+    })
+    expect(plan.url).toBe(
+      'https://itunes.apple.com/search?term=cloudflare&media=podcast&country=JP&limit=50&offset=100',
+    )
+    // media 非法值在 runtime 就 400，并回 allowed
+    await expect(
+      rt.buildPlan(env, { op: 'search', id: '', query: [['term', 'x'], ['media', 'book']] }),
+    ).rejects.toMatchObject({ status: 400, details: { allowed: expect.arrayContaining(['music']) } })
+    // term 允许 & （AT&T 这种），但必须被编码；= < / 一律拒
+    expect(
+      (await rt.buildPlan(env, { op: 'search', id: '', query: [['term', 'AT&T']] })).url,
+    ).toContain('term=AT%26T')
+    for (const term of ['a=b', '<script>', 'a/../b', 'a%20b']) {
+      await expect(
+        rt.buildPlan(env, { op: 'search', id: '', query: [['term', term]] }),
+      ).rejects.toThrow(/invalid term/)
+    }
+    for (const id of ['1 OR 1', '../1', 'abc']) {
+      await expect(
+        rt.buildPlan(env, { op: 'lookup', id: '', query: [['id', id]] }),
+      ).rejects.toThrow(/invalid id/)
+    }
+    expect((await rt.buildPlan(env, { op: 'lookup', id: '', query: [['id', '1765470838']] })).url).toBe(
+      'https://itunes.apple.com/lookup?id=1765470838&country=US&limit=20',
+    )
+  })
+
+  it('crossref：DOI 含斜杠走多段路由，mailto 只在配了且合法时带上', async () => {
+    const rt = runtimeFor('crossref')!
+    await putSettings(env, { 'crossref.mailto': '' })
+    clearSettingsMemo()
+    expect((await rt.buildPlan(env, { op: 'work', id: '10.2172/2407272', query: [] })).url).toBe(
+      'https://api.crossref.org/works/10.2172/2407272',
+    )
+    const search = await rt.buildPlan(env, {
+      op: 'search',
+      id: '',
+      query: [['query', 'cloudflare waf'], ['rows', '5'], ['sort', 'published'], ['order', 'asc']],
+    })
+    expect(search.url).toBe(
+      'https://api.crossref.org/works?query=cloudflare%20waf&rows=5&offset=0&sort=published&order=asc',
+    )
+
+    // polite pool：配了合法邮箱才带 mailto，配错当没配（不报错，也不带）
+    await putSettings(env, { 'crossref.mailto': 'me@example.com' })
+    clearSettingsMemo()
+    expect((await rt.buildPlan(env, { op: 'work', id: '10.2172/2407272', query: [] })).url).toBe(
+      'https://api.crossref.org/works/10.2172/2407272?mailto=me%40example.com',
+    )
+    await putSettings(env, { 'crossref.mailto': 'not-an-email' })
+    clearSettingsMemo()
+    expect((await rt.buildPlan(env, { op: 'work', id: '10.2172/2407272', query: [] })).url).toBe(
+      'https://api.crossref.org/works/10.2172/2407272',
+    )
+    await putSettings(env, { 'crossref.mailto': '' })
+    clearSettingsMemo()
+  })
+
+  it('crossref：DOI 前缀、遍历与 sort 枚举都要拦', async () => {
+    const rt = runtimeFor('crossref')!
+    for (const doi of ['11.2172/2407272', '10.2172/../admin', '10.2172/a b', 'https://x/10.1/a']) {
+      await expect(rt.buildPlan(env, { op: 'work', id: doi, query: [] })).rejects.toThrow(
+        /invalid doi/,
+      )
+    }
+    await expect(
+      rt.buildPlan(env, { op: 'search', id: '', query: [['query', 'x'], ['sort', 'random']] }),
+    ).rejects.toMatchObject({ status: 400, details: { allowed: expect.arrayContaining(['relevance']) } })
+    await expect(
+      rt.buildPlan(env, { op: 'search', id: '', query: [['query', 'x'], ['filter', 'a&b']] }),
+    ).rejects.toThrow(/invalid filter/)
+    await expect(
+      rt.buildPlan(env, { op: 'search', id: '', query: [['query', 'x'], ['select', 'DOI|<script>']] }),
+    ).rejects.toThrow(/invalid select/)
+    // query 必填
+    await expect(rt.buildPlan(env, { op: 'search', id: '', query: [] })).rejects.toThrow(
+      /missing required parameter: query/,
+    )
+  })
+
+  it('三个新源的额度与 host 都进了默认值', async () => {
+    expect((await readCredits(env, 'lobsters', 'default')).limit).toBe(6000)
+    expect((await readCredits(env, 'itunes', 'default')).limit).toBe(9000)
+    expect((await readCredits(env, 'crossref', 'default')).limit).toBe(5000)
+    for (const host of ['lobste.rs', 'itunes.apple.com', 'api.crossref.org']) {
+      expect(ALLOWLIST).toContain(host)
+    }
+  })
+})
+
 describe('P3 付费通道（tier C）', () => {
   const eco = runtimeFor('economist')!
 
@@ -487,11 +628,20 @@ describe('P3 付费通道（tier C）', () => {
     const slug = endpoint.params.find((param) => param.name === 'slug')!
     expect(slug.in).toBe('path')
     expect(slug.multiSegment).toBe(true)
-    // 其他 provider 的路径参数都是单段
-    for (const { provider, endpoint: item } of allEndpoints()) {
-      if (provider.name === 'economist') continue
+    // 目前只有"路径天然含 /"的端点才需要多段：economist 的 slug、crossref 的 DOI
+    expect(
+      allEndpoints()
+        .flatMap(({ provider, endpoint: item }) =>
+          item.params
+            .filter((param) => param.multiSegment === true)
+            .map((param) => `${provider.name}.${item.op}.${param.name}`),
+        )
+        .sort(),
+    ).toEqual(['crossref.work.doi', 'economist.article.slug'])
+    // multiSegment 是路由层特性，只对 path 参数有意义
+    for (const { endpoint: item } of allEndpoints()) {
       for (const param of item.params.filter((x) => x.multiSegment === true)) {
-        expect(`${provider.name}.${item.op}.${param.name}`).toBe('')
+        expect(param.in).toBe('path')
       }
     }
   })

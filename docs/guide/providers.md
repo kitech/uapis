@@ -8,8 +8,8 @@
 
 | tier | 含义 | 现状 |
 | --- | --- | --- |
-| A | 官方公开 API，无需凭据，宽松限流 | hackernews |
-| A- | 官方 API 匿名可用，但限流严格或需要限速 | github（token 可选）、devto、arxiv |
+| A | 官方公开 API，无需凭据，宽松限流 | hackernews、lobsters |
+| A- | 官方 API 匿名可用，但限流严格或需要限速 | github（token 可选）、devto、arxiv、itunes、crossref |
 | B | 官方 API 但要注册 key | stackexchange |
 | C | 付费墙/非官方源，必须走付费代理通道 | economist |
 
@@ -105,6 +105,61 @@ tier C 没有单一的 `auth.settingKey`，而是 `requiredAnyOf`：ZenRows / Ji
 - 不是通用 XML 解析器：只认 arXiv `api/query` 的固定结构，上游改结构才会失效
 - `search_query` 白名单字符（`&`、`%` 等一律拒掉），防止拼出意料之外的 URL
 
+## Lobsters · tier A
+
+上游：`https://lobste.rs`，官方自带 JSON 接口，零 key。
+
+| 方法 | 路径 | 参数 |
+| --- | --- | --- |
+| GET | `/api/v1/lobsters/hot` | 无；映射上游 `/hottest.json` |
+| GET | `/api/v1/lobsters/newest` | 无；映射上游 `/newest.json` |
+| GET | `/api/v1/lobsters/tag/{tag}` | 路径 `tag`：`^[a-z0-9][a-z0-9-]{0,30}$`；映射 `/t/{tag}.json` |
+| GET | `/api/v1/lobsters/story/{id}` | 路径 `id`：short_id，`^[0-9a-z]{4,10}$`；映射 `/s/{id}.json` |
+
+- **路径名和上游不一样**：`hot` → `hottest.json`、`newest` → `newest.json`。
+  直觉上的 `/hot.json`、`/new.json`、`/recent.json` 全是 404（实测过）
+- 列表固定约 25 条，上游没有分页参数（`?page=` 之类会被忽略），所以这四个端点不暴露分页
+- 闸门 1000ms；官方未公布硬性限流，纯自我约束
+- 归属：故事版权归各提交者，Lobsters 内容按 CC BY-SA 3.0
+
+## iTunes Search · tier A-
+
+上游：`https://itunes.apple.com`，Apple 公开 Search API，零 key。
+
+| 方法 | 路径 | 参数 |
+| --- | --- | --- |
+| GET | `/api/v1/itunes/search` | `term`（必填）、`media`（12 种，默认 podcast）、`entity`、`country`（两位，默认 US）、`limit`(1-200, 默认 20)、`offset`(0-500, 默认 0) |
+| GET | `/api/v1/itunes/lookup` | `id`（必填，纯数字）、`entity`、`country`、`limit`(1-200, 默认 20) |
+
+- 闸门 500ms；官方未公布硬性限流
+- **分页是 `offset` 不是 `page`**：与 Algolia / SE 的 `page` 约定不同，照上游习惯保留
+- `limit` 上界 200：实测 201 也能返回，但体积过大（约 300KB+）且收益递减，直接卡在 200
+- `term` 走字符白名单（Unicode 字母数字 + 空格与常见标点）：`&` 这类必须留给 `encodeURIComponent`，
+  `=`、`<`、`/`、`%` 一律拒掉，防止拼出意料之外的 URL
+- `media` 非法值在 runtime 就 400，`details.allowed` 列出全部合法值
+- 归属：封面与简介版权归 Apple 及各自权利人，只做元数据转发
+
+## Crossref · tier A-
+
+上游：`https://api.crossref.org`，DOI 注册机构官方检索 API，零 key。
+
+| 方法 | 路径 | 参数 |
+| --- | --- | --- |
+| GET | `/api/v1/crossref/search` | `query`（必填）、`rows`(1-30, 默认 10)、`offset`(0-1000, 默认 0)、`sort`（7 个字段）、`order`(asc/desc)、`filter`、`select` |
+| GET | `/api/v1/crossref/work/{doi}` | 路径 `doi`：**含斜杠**，如 `10.2172/2407272` |
+
+- 闸门 1000ms。Crossref 的 polite pool 官方给到约 50 次/秒，1 秒一条是自我约束
+- **`rows` 上界 30**：实测 `rows=20` 响应约 59KB，再往上对本项目没有意义（免费 CPU/D1 额度优先给命中率）
+- `doi` 走 `multiSegment`（`10.<registrant>/<suffix>` 天然多段），白名单 `^10\.[0-9]{4,9}/[A-Za-z0-9._()/:;+-]{1,180}$`
+  并额外拒掉 `..` 相对路径段；老 DOI 里那些 `<` `>` 形态的字符不支持
+- 响应是 `{"status":"ok","message":{...}}` 信封，原样透传（和 HN / SE 一致，不二次拆包）
+- **polite pool**：可选设置 `crossref.mailto`，填了合法邮箱就带上 `mailto` 参数进 polite pool；
+  填错（不像邮箱）当没配，不报错也不带参数
+- `filter` / `select` 只放行字符集（`select` 还能省流量：`select=DOI,title,issued`）
+- `mailto` 是服务端设置、**不进缓存键**：配与不配共用同一个缓存条目，
+  先到先得（Crossref 两种池子返回的题录一致，不影响正确性）
+- 归属：题录（标题/作者/期刊）版权归出版方与 Crossref
+
 ## The Economist · tier C（付费通道）
 
 | 方法 | 路径 | 参数 |
@@ -144,6 +199,7 @@ curl -X PUT https://<你的域名>/admin/settings \
 只有 `se.key` 是必需的（不配就是 `503 PROVIDER_UNCONFIGURED`）。
 `gh.token` 配不配都能跑：配了走 `Authorization: Bearer`，不配就匿名。
 `zenrows.key` / `jina.key` 任一即可让 tier C 源可用，两个都不配时该源报 `unconfigured`。
+`crossref.mailto` 是可选的礼貌设置（进 polite pool），不填也能用。
 `reddit.*`、`youtube.key`、`ph.key`、`lastfm.key`、`telegram.token` 这些预留给后续阶段的 key
 不要写进 `migrations/seed.sql`。
 
@@ -177,6 +233,11 @@ curl -s https://<你的域名>/status | jq '.providers'
 | `devto/articles` | `page` | 1 |
 | `github/search/repositories` | `page` | 1 |
 | `arxiv/search` | `start`（偏移量） | 0 |
+| `itunes/search` | `offset`（偏移量，不是 `page`） | 0 |
+| `crossref/search` | `offset`（偏移量），条数参数叫 `rows` | 0 |
+
+lobste.rs 的四个端点没有分页：上游固定返回约 25 条，多余的分页参数会被忽略，
+所以干脆不暴露。
 
 必填参数缺失同样是 400（`details.parameter` 告诉你少了哪个）。
 上界是硬限制：越界直接 `400 INVALID_PARAMETER`，`details.maximum` 告诉你真实上界。

@@ -84,6 +84,41 @@
 - 端点：`search`、`paper/{id}`，都是 archive 档
 - 额度：`quota.arxiv.default` = 4000
 
+### lobsters · tier A ✅
+
+- 上游：`https://lobste.rs`（站点自带的 JSON 接口）
+- 凭据：零 key
+- 归属：故事版权归各提交者，内容按 CC BY-SA 3.0
+- 条款：<https://lobste.rs/about>
+- 端点：`hot` / `newest` / `tag/{tag}`（feed 档）、`story/{id}`（item 档）
+- 全部透传；闸门 1000ms；官方未公布硬性限流
+- **接之前 curl 过才写**：官方路径是 `hottest.json` / `newest.json` / `t/{tag}.json` / `s/{id}.json`，
+  直觉路径（`hot.json` / `new.json` / `recent.json`）全是 404
+- 上游无分页（多余分页参数被忽略），因此不暴露分页参数
+- 额度：`quota.lobsters.default` = 6000
+
+### itunes · tier A- ✅
+
+- 上游：`https://itunes.apple.com`（Apple 公开 Search API）
+- 凭据：零 key；条款 <https://performance-partners.apple.com/terms>
+- 端点：`search`（search 档）、`lookup`（item 档）
+- 全部透传；闸门 500ms；`limit` 卡 200（上游上限）
+- `term` 字符白名单（`&` 保留但必须编码，`=`/`<`/`/`/`%` 拒掉）；`media` 枚举在 runtime 校验
+- 分页用 `offset` 而不是 `page`（跟上游），已在文档标注
+- 归属：封面与简介版权归 Apple 及各自权利人，只做元数据转发
+- 额度：`quota.itunes.default` = 9000
+
+### crossref · tier A- ✅
+
+- 上游：`https://api.crossref.org`
+- 凭据：零 key；REST API 文档 <https://www.crossref.org/documentation/retrieve-metadata/rest-api/>
+- 端点：`search`（search 档，`rows` ≤ 30）、`work/{doi}`（item 档）
+- 全部透传（`{status, message}` 信封原样返回）；闸门 1000ms
+- `doi` 走 `multiSegment`，前缀固定 `10.`，额外拒 `..`；老 DOI 里的 `<>` 形态不支持
+- polite pool：可选 `crossref.mailto`，填了合法邮箱才带 `mailto`；填错当没配
+- 归属：题录版权归出版方与 Crossref
+- 额度：`quota.crossref.default` = 5000
+
 ### economist · tier C ⚠️ 需自行确认条款
 
 - 目标 host：`www.economist.com`——**我们不直连**，只作为 `proxy.host` 的校验对象；
@@ -110,8 +145,10 @@
   PubMed E-utilities、Open Library、Wikipedia（MediaWiki Action/REST API）
 - **需 key 源**（tier B）：F-Droid、YouTube Data API、Phonark/Last.fm、Telegram Bot API
 
-> 说明：dev.to / GitHub / arXiv 已于 P2 接入（见上）。Wikipedia 与 Open Library
-> 在开发机上网络不通（连接超时），无法实测响应结构，因此没有凭印象写进来。
+> 说明：dev.to / GitHub / arXiv 已于 P2 接入，lobsters / itunes / crossref 于 P4 接入（见上）。
+> Wikipedia、Open Library、YouTube、Docker Hub、F-Droid 在开发机上网络不通（连接超时），
+> MusicBrainz 503、crates.io 403（UA 拦截），因此没有凭印象写进来。
+> PyPI、npm registry、PubMed E-utilities 实测可达（HTTP 200），留作下一批候选。
 > 接任何新源之前必须先 curl 一遍确认能通、能拿到预期结构。
 - **付费墙源**（tier C）：机制已就绪（ZenRows / Jina 双通道、额度、tier C 校验），
   economist 已接入作为参考实现；下一个源同样要先过条款这一关，

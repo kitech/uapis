@@ -32,14 +32,22 @@ export function policyFor(resource: Resource): TtlPolicy {
 
 export const COMPRESS_THRESHOLD_BYTES = 1024
 export const T1_MIN_TTL_SECONDS = 60
-export const CACHE_KEY_VERSION = 'v1'
+/**
+ * v3：键里多了 op 这一段、且 id 保留大小写。
+ * 之前只有 provider/resource/id/query，像 lobsters/hot 与 lobsters/newest 这种
+ * 既无路径参数又无 query 的端点 id 都是空串（落到 `root`），于是共用一个缓存条目，
+ * 请求 newest 会直接吐 hot 的内容。加 op 段彻底分开。
+ *
+ * 同时 sanitizeId 不再小写化：target.ts 明确说 id 保留大小写（有的站点 handle
+ * 大小写敏感），但键里被 lower 了，`tag/Rust` 会命中 `tag/rust` 的缓存——两次整批作废。
+ */
+export const CACHE_KEY_VERSION = 'v3'
 
-/** 归一化资源 id：小写、去掉多余空白与路径穿越字符 */
+/** 归一化资源 id：去掉多余空白与路径穿越字符；大小写必须保留，否则大小写不同的 id 会撞键 */
 export function sanitizeId(raw: string): string {
   return raw
     .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9._:@-]+/g, '-')
+    .replace(/[^A-Za-z0-9._:@-]+/g, '-')
     .replace(/-{2,}/g, '-')
     .replace(/^-|-$/g, '')
     .slice(0, 120)
@@ -63,12 +71,13 @@ export function hashPairs(pairs: [string, string][]): string {
 export function buildCacheKey(
   provider: string,
   resource: Resource,
+  op: string,
   id: string,
   queryPairs: [string, string][] = [],
 ): string {
   const idPart = sanitizeId(id) || 'root'
   const q = hashPairs(queryPairs)
-  return `${CACHE_KEY_VERSION}:${provider}:${resource}:${idPart}:${q}`
+  return `${CACHE_KEY_VERSION}:${provider}:${resource}:${op}:${idPart}:${q}`
 }
 
 export function parseCacheKey(key: string): { provider: string; resource: string } | null {

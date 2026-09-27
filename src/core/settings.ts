@@ -15,7 +15,7 @@ export const SETTINGS_DEFAULTS: Readonly<Record<string, string>> = Object.freeze
   'gate.min_ms': '',
   'cors.origins': '*',
   'upstream.allowlist':
-    'api.stackexchange.com,hn.algolia.com,api.github.com,dev.to,export.arxiv.org,api.zenrows.com,r.jina.ai',
+    'api.stackexchange.com,hn.algolia.com,api.github.com,dev.to,export.arxiv.org,api.zenrows.com,r.jina.ai,lobste.rs,itunes.apple.com,api.crossref.org',
   'queue.daily_limit': '3000',
   'queue.soft_limit': '2700',
   'warm.list': '',
@@ -32,6 +32,9 @@ export const SETTINGS_DEFAULTS: Readonly<Record<string, string>> = Object.freeze
   'quota.github.default': '4500',
   'quota.devto.default': '9000',
   'quota.arxiv.default': '4000',
+  'quota.lobsters.default': '6000',
+  'quota.itunes.default': '9000',
+  'quota.crossref.default': '5000',
 })
 
 const MEMO_TTL_MS = 30_000

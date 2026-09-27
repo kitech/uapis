@@ -4,7 +4,7 @@
 
 ## [0.1.0] - 2026-09-27
 
-P0 骨架 + P1 端点完善 + P2 零 key 源批量接入 + P3 付费代理通道。
+P0 骨架 + P1 端点完善 + P2 零 key 源批量接入 + P3 付费代理通道 + P4 再加三个零 key 源。
 
 ### Added
 
@@ -55,11 +55,24 @@ P0 骨架 + P1 端点完善 + P2 零 key 源批量接入 + P3 付费代理通道
   - `ParamDef.multiSegment` + Hono `:name{.+}`：支持含 `/` 的路径参数
   - 新增 provider `economist`（tier C）：`article/{slug}`，wall 档（24h/7d）、
     `inline: false`（miss 只入队）、只提取标题与摘要等元数据
-- 离线测试：`vitest-pool-workers` + `@msw/cloudflare` 出站拦截，129 个用例全离线
+- P4 新增 provider（全部零 key，先 curl 实测过响应结构才写）：
+  - `lobsters`（tier A）：`hot`、`newest`、`tag/{tag}`（feed 档）、`story/{id}`（item 档）；
+    官方路径是 `hottest.json` / `newest.json` / `t/{tag}.json` / `s/{id}.json`，
+    上游无分页（多余分页参数被忽略），故不暴露分页
+  - `itunes`（tier A-）：`search`、`lookup`；`limit` 卡 200（上游上限），
+    分页用 `offset` 而非 `page`，`term` 字符白名单，`media` 枚举在 runtime 校验
+  - `crossref`（tier A-）：`search`（`rows` ≤ 30）、`work/{doi}`；
+    DOI 走 `multiSegment`，可选 `crossref.mailto` 进 polite pool（填错当没配）
+- 离线测试：`vitest-pool-workers` + `@msw/cloudflare` 出站拦截，146 个用例全离线
 - VitePress 文档站（首页/快速上手/数据源/限流/错误/合规 + 参考页），部署到同一 Worker 的 `/docs`
 
 ### Fixed
 
+- **缓存键加 `op` 段（v1 → v3）**：既无路径参数又无 query 的端点 `id` 都是空串落到 `root`，
+  `lobsters/hot` 与 `lobsters/newest` 共用一个条目，请求 `newest` 会直接返回 `hot` 的内容
+- **`sanitizeId()` 不再小写化**：`target.ts` 明确说 id 保留大小写，键里被 lower 导致
+  `tag/Rust` 命中 `tag/rust` 的缓存
+- `hackernews/latest` 的测试补上 MSW handler：原先靠真实网络才 200，CI 无外网就 502
 - 管理子应用挂到 `/admin` 前缀，避免 `use('*')` 鉴权覆盖全部路由
 - 响应封装统一走 `envelope.finalize()`，避免 handler 直接返回 `Response` 时丢失
   `X-Request-ID` / CORS / 限流头（Hono 的 preparedHeaders 不会被合并）
