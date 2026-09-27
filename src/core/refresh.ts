@@ -68,28 +68,31 @@ export async function refreshTarget(
   // 先建 plan：buildPlan 可能因参数非法抛错，不能在它之前就扣额度
   const plan = await runtime.buildPlan(env, target)
 
+  // 额度记账：走付费通道的记在"通道"维度（花钱的是 ZenRows / Jina），
+  // 直连的记在"provider 自己"维度。两者都是硬上限，打满就是 503 而不是继续回源。
   let channel: ProxyChannel | undefined
   if (plan.proxy !== undefined) {
     // 通道必须先由 pickChannel 定下来再记账：显式 channel > ZenRows（消耗 credits）> Jina。
     // 之前这里用 `endpoint.proxy.channel ?? 'zenrows'` 记账，auto 模式下实际走 Jina 却记在 ZenRows 上，
     // 结果是 ZenRows 额度被凭空扣光而 Jina 的用量没被统计。
     channel = await pickChannel(env, plan.proxy.channel)
-    const paid = await consumeCredits(env, 'proxy', channel, 1)
-    if (!paid) {
-      return {
-        status: 503,
-        text: '',
-        contentType: JSON_CT,
-        key,
-        stored: false,
-        error: fail(
-          ErrorCode.QuotaExhausted,
-          `daily quota exhausted for ${providerName}`,
-          503,
-          { provider: providerName, channel },
-          3600,
-        ),
-      }
+  }
+  const dimension = plan.proxy !== undefined ? 'proxy' : providerName
+  const charged = channel ?? 'default'
+  if (!(await consumeCredits(env, dimension, charged, 1))) {
+    return {
+      status: 503,
+      text: '',
+      contentType: JSON_CT,
+      key,
+      stored: false,
+      error: fail(
+        ErrorCode.QuotaExhausted,
+        `daily quota exhausted for ${providerName}`,
+        503,
+        { provider: providerName, ...(channel === undefined ? {} : { channel }) },
+        3600,
+      ),
     }
   }
 

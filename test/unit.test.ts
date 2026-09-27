@@ -1,11 +1,19 @@
 import { env as cloudflareEnv } from 'cloudflare:workers'
-import { describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { http, HttpResponse } from 'msw'
+import { network } from './server'
 import { ApiError, ErrorCode, mapUpstreamStatus } from '../src/core/errors'
 import { buildCacheKey, hashPairs, sanitizeId, TTL_POLICIES } from '../src/core/ttl'
-import { clearSettingsMemo, putSettings } from '../src/core/settings'
+import { clearSettingsMemo, putSettings, SETTINGS_DEFAULTS } from '../src/core/settings'
 import { decodeTarget, encodeTarget } from '../src/core/target'
 import { parseMessage } from '../src/core/queue'
-import { allEndpoints, operationIdOf, REGISTRY, validateRegistry } from '../src/core/registry'
+import {
+  allEndpoints,
+  missingQuotaDefaults,
+  operationIdOf,
+  REGISTRY,
+  validateRegistry,
+} from '../src/core/registry'
 import { buildOpenApi } from '../src/core/openapi'
 import { assertAllowedUpstream, userAgent } from '../src/core/fetcher'
 import { consumeCredits, readCredits, resetCredits } from '../src/core/credits'
@@ -13,7 +21,7 @@ import { runtimeFor } from '../src/providers'
 import { parseAtom } from '../src/providers/arxiv'
 import { extractArticle } from '../src/providers/economist'
 import { egressHostsOf, providerByName } from '../src/core/registry'
-import { pickChannel } from '../src/core/fetcher'
+import { fetchUpstream, pickChannel } from '../src/core/fetcher'
 
 /** miniflare 的 Cloudflare.Env 缺少 src/types.ts 里声明的 ADMIN_TOKEN，测试里做一次桥接 */
 const env = cloudflareEnv as unknown as Env
@@ -29,6 +37,9 @@ const ALLOWLIST = [
   'lobste.rs',
   'itunes.apple.com',
   'api.crossref.org',
+  'pypi.org',
+  'registry.npmjs.org',
+  'eutils.ncbi.nlm.nih.gov',
 ]
 
 describe('错误体与状态码映射', () => {
@@ -137,6 +148,23 @@ describe('registry 自检', () => {
     const result = validateRegistry(ALLOWLIST)
     expect(result.problems).toEqual([])
     expect(result.ok).toBe(true)
+  })
+
+  it('每个直连 provider 都必须有正的 quota.<name>.default（否则回源不受限）', () => {
+    expect(missingQuotaDefaults(SETTINGS_DEFAULTS)).toEqual([])
+    // 故意漏一个额度键：自检要能报出来
+    const partial: Record<string, string> = {}
+    for (const [key, value] of Object.entries(SETTINGS_DEFAULTS)) {
+      if (key === 'quota.github.default') continue
+      partial[key] = value
+    }
+    const missing = missingQuotaDefaults(partial)
+    expect(missing).toHaveLength(1)
+    expect(missing[0]).toContain('quota.github.default')
+    // 0 表示不限，同样算漏配（"忘了"和"故意"在效果上无法区分）
+    expect(missingQuotaDefaults({ ...SETTINGS_DEFAULTS, 'quota.github.default': '0' })).toEqual([
+      expect.stringContaining('quota.github.default'),
+    ])
   })
 
   it('host 未进白名单会被拦下', () => {
@@ -550,6 +578,248 @@ describe('P4 新增零 key 源', () => {
   })
 })
 
+describe('上游正文读失败要算 504，不能冒成 500', () => {
+  beforeAll(() => {
+    network.enable()
+  })
+  afterAll(() => {
+    network.disable()
+  })
+
+  it('状态行到了但正文断流：按 504 重试并最终返回 504', async () => {
+    let attempts = 0
+    network.use(
+      http.get('https://api.crossref.org/works/stall', () => {
+        attempts += 1
+        // 状态行与头已经到了，正文读一半断掉（真实场景是 AbortSignal.timeout 在读正文时抛
+        // TimeoutError，CDN 接了连接但不落正文时就是这个样子）
+        const broken = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.error(new Error('upstream body stalled'))
+          },
+        })
+        return new HttpResponse(broken, {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      }),
+    )
+    const res = await fetchUpstream(env, {
+      url: 'https://api.crossref.org/works/stall',
+      timeoutMs: 120,
+      retries: 1,
+    })
+    expect(res.status).toBe(504)
+    expect(res.raw).toContain('stalled')
+    expect(attempts).toBe(2)
+  })
+
+  it('200 + 空正文不当成功：算 502，调用方不会把空条目写进缓存', async () => {
+    network.use(http.get('https://api.crossref.org/works/empty', () => new HttpResponse(null, { status: 200 })))
+    const res = await fetchUpstream(env, {
+      url: 'https://api.crossref.org/works/empty',
+      timeoutMs: 500,
+      retries: 0,
+    })
+    expect(res.status).toBe(502)
+    expect(res.raw).toContain('empty body')
+  })
+})
+
+describe('P5 包管理与文献检索源', () => {
+  it('pypi：包名按 PEP 503 归一化，transform 砍掉 releases 与 README', async () => {
+    const rt = runtimeFor('pypi')!
+    expect((await rt.buildPlan(env, { op: 'project', id: 'Django_REST', query: [] })).url).toBe(
+      'https://pypi.org/pypi/django_rest/json',
+    )
+    expect((await rt.buildPlan(env, { op: 'release', id: 'requests/2.34.2', query: [] })).url).toBe(
+      'https://pypi.org/pypi/requests/2.34.2/json',
+    )
+    for (const bad of ['../etc', 'a/b', '-leading', 'trailing-', 'a b', '']) {
+      await expect(rt.buildPlan(env, { op: 'project', id: bad, query: [] })).rejects.toThrow(
+        /invalid package/,
+      )
+    }
+    for (const bad of ['requests/2.34.2/extra', 'requests/..', 'requests/2 34', 'requests/']) {
+      await expect(rt.buildPlan(env, { op: 'release', id: bad, query: [] })).rejects.toThrow(
+        /invalid/,
+      )
+    }
+
+    // 上游真实形态的裁剪：releases（96% 体积）与 description 全文都不该出现在输出里
+    const upstream = JSON.stringify({
+      info: {
+        name: 'requests',
+        version: '2.34.2',
+        summary: 'Python HTTP for Humans.',
+        description: 'X'.repeat(50_000),
+        description_content_type: 'text/markdown',
+        requires_python: '>=3.10',
+        license: 'Apache-2.0',
+        classifiers: ['Programming Language :: Python'],
+        requires_dist: ['urllib3>=1.21.1'],
+        project_urls: { Source: 'https://github.com/psf/requests' },
+        dynamic: ['description'],
+      },
+      last_serial: 37059094,
+      releases: { '0.0.1': [{ filename: 'requests-0.0.1.tar.gz', url: 'https://files.pythonhosted.org/x' }] },
+      urls: [
+        {
+          filename: 'requests-2.34.2-py3-none-any.whl',
+          packagetype: 'bdist_wheel',
+          size: 65435,
+          upload_time: '2026-05-14T19:25:27Z',
+          yanked: false,
+          requires_python: '>=3.10',
+          url: 'https://files.pythonhosted.org/packages/aa/bb/requests-2.34.2-py3-none-any.whl',
+          digests: { sha256: 'ff' },
+          upload_time_iso_8601: '2026-05-14T19:25:27.000000Z',
+        },
+      ],
+      vulnerabilities: [],
+    })
+    const out = JSON.parse(rt.transform!(upstream, { op: 'project', id: 'requests', query: [] }).text) as {
+      provider: string
+      name: string
+      versions: string[]
+      files: Record<string, unknown>[]
+      last_serial: number
+    }
+    expect(out.provider).toBe('pypi')
+    expect(out.name).toBe('requests')
+    expect(out.versions).toEqual(['0.0.1'])
+    expect(out.files[0]).toMatchObject({ filename: 'requests-2.34.2-py3-none-any.whl', size: 65435 })
+    expect(JSON.stringify(out)).not.toContain('X'.repeat(1000))
+    expect(JSON.stringify(out)).not.toContain('releases')
+    expect(JSON.stringify(out)).not.toContain('dynamic')
+    // 上游返回非 JSON 时不能把脏东西当成功落库
+    expect(() => rt.transform!('<html>maintenance</html>', { op: 'project', id: 'x', query: [] })).toThrow(
+      /non-JSON/,
+    )
+  })
+
+  it('npm：scoped 包名多段、版本拆包名要按 @scope 边界切', async () => {
+    const rt = runtimeFor('npm')!
+    expect((await rt.buildPlan(env, { op: 'latest', id: 'react', query: [] })).url).toBe(
+      'https://registry.npmjs.org/react/latest',
+    )
+    expect((await rt.buildPlan(env, { op: 'latest', id: '@types/node', query: [] })).url).toBe(
+      'https://registry.npmjs.org/@types/node/latest',
+    )
+    expect((await rt.buildPlan(env, { op: 'version', id: '@types/node/26.6.3', query: [] })).url).toBe(
+      'https://registry.npmjs.org/@types/node/26.6.3',
+    )
+    expect((await rt.buildPlan(env, { op: 'version', id: 'react/18.3.1', query: [] })).url).toBe(
+      'https://registry.npmjs.org/react/18.3.1',
+    )
+    // 切错段就会把包名/版本拼反：@scope/pkg + 版本 才是三段
+    for (const bad of ['@types/node', 'react/18.3.1/extra', '@types/node/26.6.3/x']) {
+      await expect(rt.buildPlan(env, { op: 'version', id: bad, query: [] })).rejects.toThrow(
+        /invalid target/,
+      )
+    }
+    for (const bad of ['../x', 'React', 'a b', '@/pkg', '@scope/', 'x'.repeat(120)]) {
+      await expect(rt.buildPlan(env, { op: 'latest', id: bad, query: [] })).rejects.toThrow(
+        /invalid package name/,
+      )
+    }
+    await expect(
+      rt.buildPlan(env, { op: 'version', id: 'react/..', query: [] }),
+    ).rejects.toThrow(/invalid version/)
+  })
+
+  it('npm search：只放行白名单参数，sort 枚举非法时报 allowed', async () => {
+    const rt = runtimeFor('npm')!
+    expect(
+      (await rt.buildPlan(env, { op: 'search', id: '', query: [['text', 'web framework'], ['size', '20']] })).url,
+    ).toBe('https://registry.npmjs.org/-/v1/search?text=web%20framework&size=20&from=0')
+    expect(
+      (
+        await rt.buildPlan(env, {
+          op: 'search',
+          id: '',
+          query: [['text', 'react'], ['sort', 'popularity']],
+        })
+      ).url,
+    ).toContain('&sort=popularity')
+    // relevance 是默认值，不往上游发
+    expect(
+      (await rt.buildPlan(env, { op: 'search', id: '', query: [['text', 'x'], ['sort', 'relevance']] })).url,
+    ).not.toContain('sort=')
+    await expect(
+      rt.buildPlan(env, { op: 'search', id: '', query: [['text', 'x'], ['sort', 'stars']] }),
+    ).rejects.toMatchObject({ status: 400, details: { allowed: expect.arrayContaining(['popularity']) } })
+    // 检索词里允许 `@types/node`、`node/react` 这类含 / 的写法，但必须被编码
+    expect(
+      (await rt.buildPlan(env, { op: 'search', id: '', query: [['text', '@types/node']] })).url,
+    ).toContain('text=%40types%2Fnode')
+    for (const text of ['a&b', 'a=b', '<script>', '%2e%2e', '']) {
+      await expect(
+        rt.buildPlan(env, { op: 'search', id: '', query: [['text', text]] }),
+      ).rejects.toThrow(/invalid text/)
+    }
+  })
+
+  it('pubmed：空 term 与非法 PMID 必须自己拒（上游都是 200 + 错误体）', async () => {
+    const rt = runtimeFor('pubmed')!
+    await putSettings(env, { 'ncbi.api_key': '' })
+    clearSettingsMemo()
+    expect(
+      (await rt.buildPlan(env, { op: 'search', id: '', query: [['term', 'cloudflare AND waf']] })).url,
+    ).toBe(
+      'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=cloudflare%20AND%20waf&retmode=json&retmax=20&retstart=0&sort=relevance',
+    )
+    expect(
+      (await rt.buildPlan(env, { op: 'summary', id: '', query: [['id', '35369193,32015575']] })).url,
+    ).toBe(
+      'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&id=35369193%2C32015575&retmode=json&version=2.0',
+    )
+
+    // 上游对这两种输入都返回 200，放行就会把错误体当正常数据缓存起来
+    await expect(rt.buildPlan(env, { op: 'search', id: '', query: [] })).rejects.toThrow(
+      /missing required parameter: term/,
+    )
+    for (const id of ['notanumber', '35369193,', '1,abc', '1;drop', '1'.repeat(20), '']) {
+      await expect(
+        rt.buildPlan(env, { op: 'summary', id: '', query: [['id', id]] }),
+      ).rejects.toThrow(/invalid id/)
+    }
+    await expect(
+      rt.buildPlan(env, { op: 'search', id: '', query: [['term', 'x'], ['sort', 'relevancee']] }),
+    ).rejects.toMatchObject({ status: 400, details: { allowed: expect.arrayContaining(['pub_date']) } })
+  })
+
+  it('pubmed：配了合法 ncbi.api_key 才带上，配错当没配', async () => {
+    const rt = runtimeFor('pubmed')!
+    await putSettings(env, { 'ncbi.api_key': 'NCBI1234567890' })
+    clearSettingsMemo()
+    expect(
+      (await rt.buildPlan(env, { op: 'search', id: '', query: [['term', 'waf']] })).url,
+    ).toContain('&api_key=NCBI1234567890')
+    // key 只发往 eutils（白名单唯一出口），且不进缓存键
+    expect(
+      (await rt.buildPlan(env, { op: 'search', id: '', query: [['term', 'waf']] })).url,
+    ).toContain('eutils.ncbi.nlm.nih.gov')
+
+    await putSettings(env, { 'ncbi.api_key': 'short' })
+    clearSettingsMemo()
+    expect(
+      (await rt.buildPlan(env, { op: 'summary', id: '', query: [['id', '1']] })).url,
+    ).not.toContain('api_key')
+    await putSettings(env, { 'ncbi.api_key': '' })
+    clearSettingsMemo()
+  })
+
+  it('P5 三个源的额度与 host 都进了默认值', async () => {
+    expect((await readCredits(env, 'pypi', 'default')).limit).toBe(6000)
+    expect((await readCredits(env, 'npm', 'default')).limit).toBe(8000)
+    expect((await readCredits(env, 'pubmed', 'default')).limit).toBe(10000)
+    for (const host of ['pypi.org', 'registry.npmjs.org', 'eutils.ncbi.nlm.nih.gov']) {
+      expect(ALLOWLIST).toContain(host)
+    }
+  })
+})
+
 describe('P3 付费通道（tier C）', () => {
   const eco = runtimeFor('economist')!
 
@@ -628,7 +898,8 @@ describe('P3 付费通道（tier C）', () => {
     const slug = endpoint.params.find((param) => param.name === 'slug')!
     expect(slug.in).toBe('path')
     expect(slug.multiSegment).toBe(true)
-    // 目前只有"路径天然含 /"的端点才需要多段：economist 的 slug、crossref 的 DOI
+    // 目前只有"路径天然含 /"的端点才需要多段：economist 的 slug、crossref 的 DOI、
+    // npm 的 scoped 包名（@scope/pkg）
     expect(
       allEndpoints()
         .flatMap(({ provider, endpoint: item }) =>
@@ -637,7 +908,12 @@ describe('P3 付费通道（tier C）', () => {
             .map((param) => `${provider.name}.${item.op}.${param.name}`),
         )
         .sort(),
-    ).toEqual(['crossref.work.doi', 'economist.article.slug'])
+    ).toEqual([
+      'crossref.work.doi',
+      'economist.article.slug',
+      'npm.latest.name',
+      'npm.version.name',
+    ])
     // multiSegment 是路由层特性，只对 path 参数有意义
     for (const { endpoint: item } of allEndpoints()) {
       for (const param of item.params.filter((x) => x.multiSegment === true)) {

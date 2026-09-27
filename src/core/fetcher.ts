@@ -116,9 +116,30 @@ export async function fetchUpstream(
           bytes: declared,
         })
       }
-      const raw = await response.text()
+      let raw: string
+      try {
+        raw = await response.text()
+      } catch (error) {
+        // 状态行到了、正文没到（对端挂起或中途断流）：`AbortSignal.timeout` 会在读正文时
+        // 抛 TimeoutError。不接住的话它会一路冒到 onError 变成 500 INTERNAL_ERROR，
+        // 而且不写负缓存——同一个 key 每次都白等一个超时。P5 接 pypi/npm 时在 Fastly
+        // 前置的 CDN 上撞到过（连得上、正文不落地）。
+        lastStatus = 504
+        lastRaw = error instanceof Error ? error.message : 'upstream body read failed'
+        if (attempts > retries) break
+        await sleep(BACKOFF_MS[Math.min(attempts - 1, BACKOFF_MS.length - 1)] ?? 200)
+        continue
+      }
       if (raw.length > MAX_UPSTREAM_BYTES) {
         throw fail(ErrorCode.FileTooLarge, 'upstream payload too large', 413)
+      }
+      if (raw.length === 0) {
+        // 空正文当 200 落库会缓存出一个"成功但没内容"的条目
+        lastStatus = 502
+        lastRaw = 'upstream returned an empty body'
+        if (attempts > retries) break
+        await sleep(BACKOFF_MS[Math.min(attempts - 1, BACKOFF_MS.length - 1)] ?? 200)
+        continue
       }
       return {
         status: response.status,

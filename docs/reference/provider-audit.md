@@ -119,6 +119,50 @@
 - 归属：题录版权归出版方与 Crossref
 - 额度：`quota.crossref.default` = 5000
 
+### pypi · tier A ✅
+
+- 上游：`https://pypi.org/pypi`
+- 凭据：零 key；文档 <https://warehouse.pypa.io/api-reference/json/>
+- 端点：`project/{package}`（search 档，**transform**）、`release/{package}/{version}`（item 档，透传）
+- 依据实测定的 transform：`requests` 约 193KB、`numpy` 约 1.6MB，其中绝大部分是
+  `releases`（全部历史版本）；README 全文 `description` 另有 50KB+
+- transform 只留选定 `info` 字段 + `versions` + 当前版本 `files` + `last_serial` + `vulnerabilities`；
+  上游返回非 JSON 直接当上游错误，不落库
+- 用真实 `requests` 响应（192,960B）跑 transform 得 4,403B，163 个历史版本折叠成 `versions`
+- 包名按 PEP 503 归一化（`Django_REST` → `django_rest`），版本号白名单覆盖 PEP 440 常用形态
+- 不做 simple index（100KB+ HTML 锚点列表，本项目不解析 HTML）
+- 归属：包元数据与代码版权归各自作者/维护方
+- 额度：`quota.pypi.default` = 6000
+
+### npm · tier A- ✅
+
+- 上游：`https://registry.npmjs.org`
+- 凭据：零 key；文档 <https://github.com/npm/registry/blob/master/docs/REGISTRY-API.md>
+- 端点：`latest/{name}`、`version/{name}/{version}`（均 item 档，透传）、`search`（search 档，透传）
+- `name` 走 `multiSegment`（scoped 包 `@types/node` 天然多段），小写字符白名单
+- `version` 端点按 `@scope/` 边界切包名与版本，段数不对直接 400
+- **不做 packument**：abbreviated 文档 `react` 2.9MB、`@types/node` 2.3MB，
+  完整文档 `lodash` 248KB，都超出本项目 512KB 单响应上限或会打满缓存
+- `search` 只放行 `text`/`size`/`from`/`sort`，其余 query 400
+- 归属：包元数据与代码版权归各自作者/维护方，npm registry 只做分发
+- 额度：`quota.npm.default` = 8000
+
+### pubmed · tier A- ✅
+
+- 上游：`https://eutils.ncbi.nlm.nih.gov/entrez/eutils`
+- 凭据：**零 key 可用**；可选 `ncbi.api_key`（官方 3 → 10 次/秒）；
+  申请 <https://www.ncbi.nlm.nih.gov/account/settings/>；
+  使用规范 <https://www.ncbi.nlm.nih.gov/books/NBK25501/>
+- 端点：`search`（esearch，search 档）、`summary`（esummary `version=2.0`，item 档），均透传 JSON
+- **必须自己挡的坑**：空 `term` 与非法 PMID 上游都返回 **HTTP 200 + 错误体**
+  （"Empty term and query_key - nothing todo" / `{"error":"Invalid uid ..."}`），
+  放行就会把错误体缓存下来
+- 不做 efetch（只能返回 XML/MEDLINE 文本，要引正则解析器）
+- 闸门 400ms（≈2.5 次/秒，无 key 也在官方 3 次/秒内）
+- `ncbi.api_key` 只发往 eutils（白名单唯一出口），不进缓存键；填错当没配
+- 归属：题录版权归作者与出版商，PubMed 只做索引
+- 额度：`quota.pubmed.default` = 10000
+
 ### economist · tier C ⚠️ 需自行确认条款
 
 - 目标 host：`www.economist.com`——**我们不直连**，只作为 `proxy.host` 的校验对象；
@@ -142,14 +186,15 @@
 以下源已列入路线图，接入时逐条过上面的 checklist：
 
 - **零 key 官方源**（tier A-）：Reddit 官方 API（现需 OAuth，匿名抓取违反条款，排到最后）、
-  PubMed E-utilities、Open Library、Wikipedia（MediaWiki Action/REST API）
+  Open Library、Wikipedia（MediaWiki Action/REST API）
 - **需 key 源**（tier B）：F-Droid、YouTube Data API、Phonark/Last.fm、Telegram Bot API
 
-> 说明：dev.to / GitHub / arXiv 已于 P2 接入，lobsters / itunes / crossref 于 P4 接入（见上）。
+> 说明：dev.to / GitHub / arXiv 已于 P2 接入，lobsters / itunes / crossref 于 P4 接入，
+> PyPI / npm registry / PubMed 于 P5 接入（见上）。
 > Wikipedia、Open Library、YouTube、Docker Hub、F-Droid 在开发机上网络不通（连接超时），
 > MusicBrainz 503、crates.io 403（UA 拦截），因此没有凭印象写进来。
-> PyPI、npm registry、PubMed E-utilities 实测可达（HTTP 200），留作下一批候选。
-> 接任何新源之前必须先 curl 一遍确认能通、能拿到预期结构。
+> 接任何新源之前必须先 curl 一遍确认能通、能拿到预期结构，
+> 并按单响应 512KB 上限决定是透传还是 transform。
 - **付费墙源**（tier C）：机制已就绪（ZenRows / Jina 双通道、额度、tier C 校验），
   economist 已接入作为参考实现；下一个源同样要先过条款这一关，
   绝不提供免费绕过路径

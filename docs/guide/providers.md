@@ -160,6 +160,82 @@ tier C 没有单一的 `auth.settingKey`，而是 `requiredAnyOf`：ZenRows / Ji
   先到先得（Crossref 两种池子返回的题录一致，不影响正确性）
 - 归属：题录（标题/作者/期刊）版权归出版方与 Crossref
 
+## PyPI · tier A-
+
+上游：`https://pypi.org/pypi`，Python 官方索引，零 key。
+
+| 方法 | 路径 | 参数 |
+| --- | --- | --- |
+| GET | `/api/v1/pypi/project/{package}` | 路径 `package`：PyPI 包名，按 PEP 503 归一化（`Django_REST` → `django_rest`） |
+| GET | `/api/v1/pypi/release/{package}/{version}` | 路径 `package`、`version`：固定版本，如 `requests/2.34.2` |
+
+- 闸门 500ms
+- **项目端点做 transform，不透传**：实测 `numpy` 的 `/json` 有 1.6MB，
+  其中 96% 是 `releases` 里全部历史版本（`requests` 也有约 195KB），
+  再加 README 全文 `description`（可达 50KB+）
+- 实测真实 `requests` 元数据：192,960B → 4,403B（2.3%），163 个历史版本折叠成 `versions` 数组
+- transform 后只保留：`name`、`version`、`summary`、`requires_python`、`license`、
+  `license_expression`、`classifiers`、`requires_dist`、`project_urls`、`yanked`、
+  `versions`（`Object.keys(releases)`，保持上传顺序）、`files`（当前版本 `urls` 的
+  `filename`/`packagetype`/`size`/`upload_time`/`yanked`/`requires_python`/`url`）、
+  `last_serial`、`vulnerabilities`，以及 `provider`、`fetched_at`
+- `releases` 的价值由 `versions` 数组 + 固定版本端点承接；README 全文改由
+  `/api/v1/pypi/project/{package}` 之外的自建途径获取，本项目不存
+- 固定版本端点实测 7KB（`requests`）到 97KB（`numpy` 52 个 wheel），直接透传
+- 白名单：包名 `^[a-z0-9]([a-z0-9._-]{0,62}[a-z0-9])?$`（归一化后），
+  版本号 `^[a-z0-9][a-z0-9.+!_-]{0,63}$`（PEP 440 常用形态，含 `1.0.0rc1` / `2.0.post1`）
+- **不做 simple index**：`/simple/{pkg}/` 是 100KB+ 的 HTML 锚点列表，
+  本项目只服务 JSON API，不解析 HTML
+- 归属：包元数据与代码版权归各自作者/维护方，PyPI 只做分发
+
+## npm registry · tier A-
+
+上游：`https://registry.npmjs.org`，零 key。
+
+| 方法 | 路径 | 参数 |
+| --- | --- | --- |
+| GET | `/api/v1/npm/latest/{name}` | 路径 `name`：包名，**scoped 包可多段**，如 `@types/node` |
+| GET | `/api/v1/npm/version/{name}/{version}` | 路径 `name`（可多段）、`version`：固定版本 |
+| GET | `/api/v1/npm/search` | `text`（必填）、`size`(1-250, 默认 10)、`from`(0 起, 默认 0)、`sort`（`-date`/`popularity`/`quality`） |
+
+- 闸门 500ms。npm 官方对匿名请求没有明确的速率承诺，1/500ms 是自我约束
+- `latest` / `version` 实测 1.6KB（lodash）到 3.5KB（`@types/node`），原样透传
+- `name` 走 `multiSegment`（scoped 包天然含 `/`），白名单
+  `^@?[a-z0-9][a-z0-9._~-]{0,213}$`；npm 包名规范就是小写，大写直接 400
+- `version` 端点按 `@scope/` 边界切包名与版本：`@types/node/26.6.3` 切成
+  `@types/node` + `26.6.3`，切错段会把包名和版本拼反，所以段数不是 2 直接 400
+- **不做 packument**（`/{name}` 与 `/{name}/latest` 之外的全量文档）：
+  abbreviated 文档对 `react` 有 2.9MB、`@types/node` 2.3MB，
+  远超本项目 512KB 的单响应上限；完整文档 `lodash` 也有 248KB，
+  热门包会立刻把缓存和免费额度打满
+- `search` 只放行白名单参数（`text`/`size`/`from`/`sort`），其余 query 一律 400；
+  `text` 允许 `@types/node`、`node/react` 这类含 `/` 的写法，但会编码后再发
+- `sort=relevance`（等价于不传）不会发给上游
+
+## PubMed（NCBI E-utilities）· tier A-
+
+上游：`https://eutils.ncbi.nlm.nih.gov/entrez/eutils`，**零 key 可用**。
+
+| 方法 | 路径 | 参数 |
+| --- | --- | --- |
+| GET | `/api/v1/pubmed/search` | `term`（必填，检索式）、`retmax`(1-100, 默认 20)、`retstart`(0 起, 默认 0)、`sort`（relevance/pub_date/Author/JournalName） |
+| GET | `/api/v1/pubmed/summary` | `id`（必填）：PMID，逗号分隔，最多 20 个 |
+
+- 闸门 400ms。NCBI 官方限制是 3 次/秒（无 key）/ 10 次/秒（有 key），
+  400ms ≈ 2.5 次/秒，无 key 也在官方额度内
+- **两个上游坑都在 runtime 里自己挡掉**：空 `term` 上游返回
+  **HTTP 200 + "Empty term and query_key - nothing todo"**，
+  非法 PMID 的 esummary 返回 **HTTP 200 + `{"error":"Invalid uid ..."}`**。
+  放行就会把 200 + 错误体当正常数据缓存起来，所以一律在回源前 400
+- `esummary` 固定 `version=2.0`（题录结构比 1.x 干净）
+- **不做 efetch**：只能返回 XML/MEDLINE 文本，要引正则解析器；
+  esearch（查 PMID）+ esummary（取题录）都支持 `retmode=json`，纯 JSON 够用
+- `retmax` 上界 100：官方最大 10000，但一次 10000 条 esummary 体积没有实用价值，
+  分页用 `retstart`
+- **可选 key**：设置 `ncbi.api_key`，填了合法值（8-64 位字母数字/`-`/`_`）才附到上游 query，
+  配错当没配；它只发往 `eutils.ncbi.nlm.nih.gov`（白名单唯一出口），**不进缓存键**
+- 归属：题录（标题/作者/期刊）版权归作者与出版商，PubMed 只做索引
+
 ## The Economist · tier C（付费通道）
 
 | 方法 | 路径 | 参数 |

@@ -30,10 +30,10 @@
 | `INTERNAL_ERROR` | 500 | Worker 内部异常 | 带上 `X-Request-ID` 反馈 |
 | `UPSTREAM_ERROR` | 502 | 上游 5xx | 稍后重试，会命中负缓存 |
 | `PROVIDER_UNCONFIGURED` | 503 | 缺 key，或付费通道一个都没配 | 配 `details.setting` 指定的设置项；tier C 看 `details.any_of`，配其中任意一个 |
-| `QUOTA_EXHAUSTED` | 503 | 今日队列/上游额度用尽 | 等 UTC 日切或调大额度 |
+| `QUOTA_EXHAUSTED` | 503 | 今日队列/上游额度用尽（`quota.<provider>.default` 或 `quota.proxy.*`） | 等 UTC 日切或调大额度；`details.provider` / `details.channel` 说明是哪个桶 |
 | `REBUILDING` | 503 | 已入队但还没有数据 | 按 `Retry-After` 重试 |
 | `SERVICE_UNAVAILABLE` | 503 | 只读/维护模式 | 看 `details.mode` |
-| `UPSTREAM_TIMEOUT` | 504 | 上游超时 | 缩小查询范围 |
+| `UPSTREAM_TIMEOUT` | 504 | 上游超时（含"连上了但正文没到"） | 缩小查询范围 |
 | `ACCEPTED` | 202 | 配合 `Prefer: respond-async`，已入队 | 轮询同一路径 |
 
 ## 排障顺序

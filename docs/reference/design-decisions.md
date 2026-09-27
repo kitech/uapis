@@ -201,3 +201,61 @@ miss 请求本身几乎不花钱。代价是首次请求拿不到数据（`503 R
 （`term=a=b`、`filter=a&b`、DOI 里的 `..` 都能拼出意料之外的请求或路径）。
 校验放在 `buildPlan()` 里还有个好处：额度扣减发生在它之后，
 非法参数永远不消耗 credits。
+
+## 超过 512KB 的上游响应要 transform，不是照搬
+
+**决策**：单响应超过 512KB 上限的端点做裁剪 transform（PyPI `project`），
+或者干脆不提供（npm packument、PyPI simple index、PubMed efetch）。
+
+**理由**：P5 接入前逐个 curl 量过体积，结论很直接——
+`numpy` 的 `/json` 1.6MB、npm abbreviated packument 的 `react` 2.9MB、
+PyPI simple index 单个包 100KB+ HTML。这类响应有三重伤害：
+一是超上限直接 413，等于端点不可用；
+二是就算放开上限，一个热门包的完整文档就会把 D1 行写和免费额度打满，
+而调用方真正要的往往只是"当前版本 + 文件列表"；
+三是 HTML/MEDLINE 文本要引正则解析器，解析器的 bug 会直接变成脏数据。
+所以 `pypi/project` 只保留选定 `info` 字段，把 `releases` 折叠成 `versions` 数组
+（历史版本仍有 `pypi/release/{package}/{version}` 可查），README 全文不存。
+packument 和 simple index 这类"整包元数据"则直接不提供：
+`react` 2.9MB 的 abbreviated 文档不是"稍微裁一下"能解决的。
+
+## 上游用 200 报错时要在 runtime 里挡掉
+
+**决策**：PubMed 的空 `term` 与非法 PMID 一律在 `buildPlan()` 里 400。
+
+**理由**：NCBI 对这两种输入都返回 **HTTP 200** 加一个错误体
+（`"Empty term and query_key - nothing todo"`、`{"error":"Invalid uid ..."}`）。
+本项目的错误映射只看状态码，200 就当成功——于是错误体会被 transform、落库、缓存，
+之后所有命中这个键的请求都拿到那句 "nothing todo"，而且因为带 `X-Cache: HIT` 看起来完全正常。
+这和 P4 修的缓存键冲突是同一类问题：脏数据一旦落库就很难被发现。
+教训：接入新源时要专门看"错误长什么样"，而不只是"成功长什么样"。
+
+## 测试里队列消费者也会真的回源
+
+**决策**：P5 补测时发现 `关闭内联回源后走队列` 那个用例会让队列消费者真的去回源
+`hackernews/item/999`，而 MSW 没有 `/api/v1/items/:id` 的 handler，
+于是这一次真实网络请求耗时约 5s（`max_batch_timeout: 5`），
+把后续每一个用例都顶到 5s 超时。修法是补 handler，不是放宽超时。
+
+**理由**：`vitest-pool-workers` 里 `REFRESH.send()` 会被测试环境自动投递给
+worker 的 `queue()` 处理器，测试并没有"不下游"这个默认行为。
+一个漏掉的 handler 就会让整套测试变慢 4 倍并随机变红，
+而且慢的是和它无关的用例——排查成本很高。
+教训：入队类用例要么显式 mock 掉消费者会碰的上游，要么用 `getQueueResult()` 把消息消费掉；
+新增 provider 时，凡是被入队用例引用到的路径都要有 handler。
+
+## 每个直连源也有硬额度
+
+**决策**：每次真正回源都扣 `quota.<provider>.default`，打满即 503；
+`missingQuotaDefaults()` 强制每个非 tier C provider 都有这个键。
+
+**理由**：额度一开始只是"配额声明"——付费通道（`quota.proxy.*`）每次回源真扣，
+零 key 源只有闸门 + 缓存命中率兜着。闸门管的是速率、管不住总量：
+一个爬虫用 60 次/分钟的合法速率，7 小时就能把 arXiv 的 4000 次/天打光，
+而上游是按 IP 计费的共享资源，打穿了是整个 IP 段一起被限。
+既然免费额度边界本来就写在 `/status` 的 `free_tier_budget` 里，
+就该有一个真的会响的闸门对应它。
+
+代价是明确的：突发流量下会直接 503 而不是"尽力返回"。
+这个取舍是故意的——本项目的定位是"可缓存的元数据快照"，
+不是"任何时候都给你兜底的抓取服务"，所以宁可明确报错也不静默超额。

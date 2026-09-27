@@ -4,7 +4,8 @@
 
 ## [0.1.0] - 2026-09-27
 
-P0 骨架 + P1 端点完善 + P2 零 key 源批量接入 + P3 付费代理通道 + P4 再加三个零 key 源。
+P0 骨架 + P1 端点完善 + P2 零 key 源批量接入 + P3 付费代理通道 + P4 再加三个零 key 源
++ P5 包管理与文献检索三个零 key 源。
 
 ### Added
 
@@ -63,10 +64,34 @@ P0 骨架 + P1 端点完善 + P2 零 key 源批量接入 + P3 付费代理通道
     分页用 `offset` 而非 `page`，`term` 字符白名单，`media` 枚举在 runtime 校验
   - `crossref`（tier A-）：`search`（`rows` ≤ 30）、`work/{doi}`；
     DOI 走 `multiSegment`，可选 `crossref.mailto` 进 polite pool（填错当没配）
-- 离线测试：`vitest-pool-workers` + `@msw/cloudflare` 出站拦截，146 个用例全离线
+- 每日额度对直连源也生效：每次真正回源（含内联与队列）扣 `quota.<provider>.default`，
+  打满即 `503 QUOTA_EXHAUSTED` + `Retry-After: 3600`；命中缓存不扣，
+  非法参数（`buildPlan` 之前）不扣，额度耗尽不写负缓存
+- `missingQuotaDefaults()` 自检：每个非 tier C provider 必须有正的
+  `quota.<name>.default`，`0`（不限）与"忘了配"同样算漏配，单元测试会红
+- `/status` 的 `providers[].credits` 现在对所有直连源给出 `used/limit/remaining`；
+  tier C 仍为 `null`，真实用量看 `channels[].credits`
+- P5 新增 provider（全部零 key，接入前先 curl 实测过体积与错误形态）：
+  - `pypi`（tier A）：`project/{package}`（**transform**）、`release/{package}/{version}`（透传）；
+    实测 `numpy` 的 `/json` 有 1.6MB 且 96% 是 `releases`，所以项目端点裁掉
+    `releases`（折叠成 `versions` 数组）与 README 全文 `description`；
+    包名按 PEP 503 归一化；不做 simple index
+  - `npm`（tier A-）：`latest/{name}`、`version/{name}/{version}`、`search`（均透传）；
+    `name` 走 `multiSegment`（scoped 包 `@types/node`），版本端点按 `@scope/` 边界切分；
+    **不做 packument**（abbreviated `react` 2.9MB、`@types/node` 2.3MB，超 512KB 上限）
+  - `pubmed`（tier A-）：`search`（esearch）、`summary`（esummary `version=2.0`），均透传；
+    空 `term` 与非法 PMID 上游都返回 **200 + 错误体**，一律在回源前 400；
+    可选 `ncbi.api_key`（3 → 10 次/秒，填错当没配，不进缓存键）；不做 efetch XML
+- 离线测试：`vitest-pool-workers` + `@msw/cloudflare` 出站拦截，173 个用例全离线
 - VitePress 文档站（首页/快速上手/数据源/限流/错误/合规 + 参考页），部署到同一 Worker 的 `/docs`
 
 ### Fixed
+
+- **上游正文读失败不再冒成 500**：状态行到了但正文断流时，`await response.text()` 抛出的
+  `TimeoutError` 会一路冒到 `onError` 变成 `500 INTERNAL_ERROR`，而且**不写负缓存**——
+  同一个 key 每次都白等一个超时。P5 接 pypi / npm 时在 Fastly 前置的 CDN 上撞到
+  （连得上、正文不落地）。现在按 504 重试并最终返回 504，走正常错误映射与负缓存；
+  顺带把 `200 + 空正文` 也判成 502，不再把"成功但没内容"的条目写进缓存
 
 - **缓存键加 `op` 段（v1 → v3）**：既无路径参数又无 query 的端点 `id` 都是空串落到 `root`，
   `lobsters/hot` 与 `lobsters/newest` 共用一个条目，请求 `newest` 会直接返回 `hot` 的内容

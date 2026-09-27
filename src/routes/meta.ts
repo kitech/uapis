@@ -49,7 +49,10 @@ meta.get('/status', async (c) => {
         provider.endpoints.some((endpoint) => endpoint.auth !== 'optional')
       const configured =
         !needsKey ? true : (await getSetting(c.env, provider.auth!.settingKey)).length > 0
-      const credits = needsKey ? await readCredits(c.env, provider.name, 'default') : null
+      // 直连的 provider 每次回源都扣 quota.<provider>.default，所以要报；
+      // tier C 记在付费通道维度，用 channels[].credits 表达，这里留 null 免得两处数字打架
+      const isTierC = (provider.requiredAnyOf ?? []).length > 0
+      const credits = isTierC ? null : await readCredits(c.env, provider.name, 'default')
 
       // tier C 没有单一 auth key，而是"任一付费通道可用即可"；
       // /status 要能一眼看出当前到底配了哪条通道、各剩多少 credits

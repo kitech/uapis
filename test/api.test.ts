@@ -23,6 +23,9 @@ const JINA = 'https://r.jina.ai'
 const LOBSTERS = 'https://lobste.rs'
 const ITUNES = 'https://itunes.apple.com'
 const CROSSREF = 'https://api.crossref.org'
+const PYPI = 'https://pypi.org'
+const NPM = 'https://registry.npmjs.org'
+const EUTILS = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils'
 
 const ECONOMIST_HTML = `<html><head><title>Fallback</title>
   <meta property="og:title" content="Paywalled &amp; locked">
@@ -64,6 +67,9 @@ let jina: { urls: string[] }
 let lobsters: { urls: string[] }
 let itunes: { urls: string[] }
 let crossref: { urls: string[] }
+let pypi: { urls: string[] }
+let npm: { urls: string[] }
+let eutils: { urls: string[] }
 
 /** 每次测试都从这组默认 handler 开始，用例内的 network.use 不会污染后续用例 */
 function defaultHandlers(): ReturnType<typeof http.get>[] {
@@ -74,6 +80,11 @@ function defaultHandlers(): ReturnType<typeof http.get>[] {
       return HttpResponse.json({ hits: [{ title: 'cloudflare workers' }] })
     }),
     // hackernews/latest 之前没 mock，靠真实网络才 200，CI 无网就 502
+    // 单条 item：入队类用例（关闭内联回源）会被队列消费者真的回源一次，
+    // 没有这个 handler 就会漏到真实网络，每个后续用例平白卡 5s
+    http.get(`${HN}/api/v1/items/:id`, ({ params }) =>
+      HttpResponse.json({ id: Number(params.id), title: `HN item ${String(params.id)}`, type: 'story' }),
+    ),
     http.get(`${HN}/api/v1/search_by_date`, ({ request }) => {
       hnSearch.calls += 1
       hnSearch.urls.push(request.url)
@@ -153,6 +164,61 @@ function defaultHandlers(): ReturnType<typeof http.get>[] {
       crossref.urls.push(request.url)
       return HttpResponse.json({ status: 'ok', 'message-type': 'work-list', items: [] })
     }),
+    http.get(`${PYPI}/pypi/:name/json`, ({ request, params }) => {
+      pypi.urls.push(request.url)
+      return HttpResponse.json({
+        info: {
+          name: params.name,
+          version: '2.34.2',
+          summary: 'Python HTTP for Humans.',
+          description: 'README '.repeat(50),
+          requires_python: '>=3.10',
+          license: 'Apache-2.0',
+          classifiers: ['Programming Language :: Python'],
+        },
+        last_serial: 37059094,
+        releases: {
+          '0.0.1': [{ filename: 'requests-0.0.1.tar.gz' }],
+          '1.0.0': [{ filename: 'requests-1.0.0.tar.gz' }],
+        },
+        urls: [{ filename: 'requests-2.34.2-py3-none-any.whl', size: 65435, upload_time: '2026-05-14T19:25:27Z' }],
+      })
+    }),
+    http.get(`${PYPI}/pypi/:name/:version/json`, ({ request, params }) => {
+      pypi.urls.push(request.url)
+      return HttpResponse.json({
+        info: { name: params.name, version: params.version, summary: 'pinned release' },
+        urls: [{ filename: 'requests-2.34.2-py3-none-any.whl', size: 65435 }],
+      })
+    }),
+    http.get(`${NPM}/-/v1/search`, ({ request }) => {
+      npm.urls.push(request.url)
+      return HttpResponse.json({
+        objects: [{ package: { name: 'react', version: '18.3.1' }, score: { final: 0.9 } }],
+        total: 1,
+      })
+    }),
+    http.get(/registry\.npmjs\.org\/(?:@[^/]+\/)?[^/]+\/(?:latest|[0-9][^/]*)$/, ({ request }) => {
+      npm.urls.push(request.url)
+      return HttpResponse.json({ name: 'react', version: '18.3.1', dist: { tarball: 'https://registry.npmjs.org/react/-/react-18.3.1.tgz' } })
+    }),
+    http.get(`${EUTILS}/esearch.fcgi`, ({ request }) => {
+      eutils.urls.push(request.url)
+      return HttpResponse.json({
+        header: { type: 'esearch' },
+        esearchresult: { count: 2, retmax: 2, retstart: 0, idlist: ['35369193', '32015575'], querytranslation: '"waf"[All Fields]' },
+      })
+    }),
+    http.get(`${EUTILS}/esummary.fcgi`, ({ request }) => {
+      eutils.urls.push(request.url)
+      return HttpResponse.json({
+        header: { type: 'esummary' },
+        result: {
+          uids: ['35369193'],
+          '35369193': { uid: '35369193', title: 'A study', pubdate: '2022', source: 'Front Psychol' },
+        },
+      })
+    }),
     // DOI 天然多段，MSW 的 `:doi{.+}` 匹配不到多段路径，用正则整段匹配
     http.get(/api\.crossref\.org\/works\/.+/, ({ request }) => {
       crossref.urls.push(request.url)
@@ -175,6 +241,9 @@ beforeAll(async () => {
   lobsters = { urls: [] }
   itunes = { urls: [] }
   crossref = { urls: [] }
+  pypi = { urls: [] }
+  npm = { urls: [] }
+  eutils = { urls: [] }
   // 测试里不真实限速：把 provider 闸门间隔压到 0
   await putSettings(env, { 'gate.min_ms': '0' })
   clearSettingsMemo()
@@ -198,6 +267,9 @@ afterEach(() => {
   lobsters.urls = []
   itunes.urls = []
   crossref.urls = []
+  pypi.urls = []
+  npm.urls = []
+  eutils.urls = []
 })
 
 // 限流是 isolate 内的固定窗口计数器，不清的话用例数一多就会互相踩出 429
@@ -254,8 +326,11 @@ describe('元数据端点', () => {
       'hackernews',
       'itunes',
       'lobsters',
+      'npm',
+      'pypi',
+      'pubmed',
       'stackexchange',
-    ])
+    ].sort())
     expect(body.providers.find((p) => p.name === 'stackexchange')?.status).toBe('unconfigured')
     // 端点级 optional：没配 key 也算 active
     const github = body.providers.find((p) => p.name === 'github')
@@ -735,6 +810,295 @@ describe('P4 新增零 key 源', () => {
     expect(text).toContain('/api/v1/lobsters/hot')
     expect(text).toContain('/api/v1/itunes/search')
     expect(text).toContain('/api/v1/crossref/work/')
+  })
+})
+
+describe('P5 包管理与文献检索源', () => {
+  it('pypi project：落库前就裁掉 releases 与 README，缓存里也是瘦身后的 JSON', async () => {
+    const res = await call('/api/v1/pypi/project/requests')
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toContain('application/json')
+    const body = (await res.json()) as {
+      provider: string
+      name: string
+      versions: string[]
+      files: { filename: string; size: number }[]
+      summary: string
+    }
+    expect(pypi.urls.at(-1)).toBe('https://pypi.org/pypi/requests/json')
+    expect(body.provider).toBe('pypi')
+    expect(body.summary).toBe('Python HTTP for Humans.')
+    // releases 折叠成版本号数组，README 全文不进缓存
+    expect(body.versions).toEqual(['0.0.1', '1.0.0'])
+    expect(body.files[0]?.filename).toBe('requests-2.34.2-py3-none-any.whl')
+    expect(JSON.stringify(body)).not.toContain('README README')
+    expect(JSON.stringify(body)).not.toContain('"releases"')
+
+    const second = await call('/api/v1/pypi/project/requests')
+    expect(['HIT', 'HIT-T1']).toContain(second.headers.get('x-cache'))
+    expect(second.headers.get('content-type')).toContain('application/json')
+  })
+
+  it('pypi release：固定版本原样透传', async () => {
+    const res = await call('/api/v1/pypi/release/requests/2.34.2')
+    expect(res.status).toBe(200)
+    expect(pypi.urls.at(-1)).toBe('https://pypi.org/pypi/requests/2.34.2/json')
+    const body = (await res.json()) as { info: { version: string } }
+    expect(body.info.version).toBe('2.34.2')
+  })
+
+  it('pypi 非法包名/版本 400，且不打上游', async () => {
+    const before = pypi.urls.length
+    for (const path of [
+      '/api/v1/pypi/project/..%2F..%2Fetc',
+      '/api/v1/pypi/project/-bad',
+      '/api/v1/pypi/project/req!uests',
+      '/api/v1/pypi/release/requests/2.34.2%20bad',
+      // latest 是 sdist/wheel 的文件名，不是 PEP 440 版本号
+      '/api/v1/pypi/release/requests/latest',
+    ]) {
+      const res = await call(path)
+      expect(res.status).toBe(400)
+      expect(((await res.json()) as { code: string }).code).toBe('INVALID_PARAMETER')
+    }
+    expect(pypi.urls.length).toBe(before)
+    // 多出来的一段直接没有路由（404），不是 400
+    expect((await call('/api/v1/pypi/release/requests/2.34.2/extra')).status).toBe(404)
+  })
+
+  it('npm latest：scoped 包名多段路由能命中', async () => {
+    const plain = await call('/api/v1/npm/latest/react')
+    expect(plain.status).toBe(200)
+    expect(npm.urls.at(-1)).toBe('https://registry.npmjs.org/react/latest')
+
+    const scoped = await call('/api/v1/npm/latest/@types/node')
+    expect(scoped.status).toBe(200)
+    expect(npm.urls.at(-1)).toBe('https://registry.npmjs.org/@types/node/latest')
+  })
+
+  it('npm version：包名与版本按 @scope 边界拆开', async () => {
+    const res = await call('/api/v1/npm/version/@types/node/26.6.3')
+    expect(res.status).toBe(200)
+    expect(npm.urls.at(-1)).toBe('https://registry.npmjs.org/@types/node/26.6.3')
+  })
+
+  it('npm search 只放行白名单参数', async () => {
+    const bad = await call('/api/v1/npm/search?text=react&evil=1')
+    expect(bad.status).toBe(400)
+    expect(npm.urls).toHaveLength(0)
+
+    const ok = await call('/api/v1/npm/search?text=%40types%2Fnode&size=5&sort=popularity')
+    expect(ok.status).toBe(200)
+    const url = new URL(npm.urls.at(-1)!)
+    expect(url.origin + url.pathname).toBe('https://registry.npmjs.org/-/v1/search')
+    expect(url.searchParams.get('text')).toBe('@types/node')
+    expect(url.searchParams.get('size')).toBe('5')
+    expect(url.searchParams.get('sort')).toBe('popularity')
+  })
+
+  it('npm 非法包名/版本 400，不回源', async () => {
+    const before = npm.urls.length
+    for (const path of [
+      '/api/v1/npm/latest/React',
+      '/api/v1/npm/latest/..%2F..%2Fetc',
+      '/api/v1/npm/latest/@/pkg',
+      '/api/v1/npm/version/react/18.3.1/extra',
+      '/api/v1/npm/version/react/18.3.1%20bad',
+      '/api/v1/npm/search?text=%3Cscript%3E',
+    ]) {
+      const res = await call(path)
+      expect(res.status).toBe(400)
+      expect(((await res.json()) as { code: string }).code).toBe('INVALID_PARAMETER')
+    }
+    expect(npm.urls.length).toBe(before)
+  })
+
+  it('pubmed search：esearch 只放行白名单参数', async () => {
+    const res = await call('/api/v1/pubmed/search?term=cloudflare%20waf&retmax=5&sort=pub_date')
+    expect(res.status).toBe(200)
+    const url = new URL(eutils.urls.at(-1)!)
+    expect(url.pathname).toBe('/entrez/eutils/esearch.fcgi')
+    expect(url.searchParams.get('db')).toBe('pubmed')
+    expect(url.searchParams.get('term')).toBe('cloudflare waf')
+    expect(url.searchParams.get('retmode')).toBe('json')
+    expect(url.searchParams.get('retmax')).toBe('5')
+    expect(url.searchParams.get('sort')).toBe('pub_date')
+    expect(url.searchParams.get('api_key')).toBeNull()
+    const body = (await res.json()) as { esearchresult: { idlist: string[] } }
+    expect(body.esearchresult.idlist).toEqual(['35369193', '32015575'])
+  })
+
+  it('pubmed summary：固定 version=2.0，PMID 逗号分隔', async () => {
+    const res = await call('/api/v1/pubmed/summary?id=35369193,32015575')
+    expect(res.status).toBe(200)
+    const url = new URL(eutils.urls.at(-1)!)
+    expect(url.pathname).toBe('/entrez/eutils/esummary.fcgi')
+    expect(url.searchParams.get('id')).toBe('35369193,32015575')
+    expect(url.searchParams.get('version')).toBe('2.0')
+  })
+
+  it('pubmed：空 term 与非法 PMID 一律 400（上游都是 200 + 错误体）', async () => {
+    const before = eutils.urls.length
+    for (const path of [
+      '/api/v1/pubmed/search',
+      '/api/v1/pubmed/search?term=%3Cscript%3E',
+      '/api/v1/pubmed/summary?id=notanumber',
+      '/api/v1/pubmed/summary?id=35369193,',
+      '/api/v1/pubmed/summary',
+      '/api/v1/pubmed/search?term=x&sort=nope',
+    ]) {
+      const res = await call(path)
+      expect(res.status).toBe(400)
+      expect(((await res.json()) as { code: string }).code).toBe('INVALID_PARAMETER')
+    }
+    expect(eutils.urls.length).toBe(before)
+  })
+
+  it('pubmed：配了 ncbi.api_key 才往上游带，且只在 eutils 出口', async () => {
+    await putSettings(env, { 'ncbi.api_key': 'NCBI1234567890' })
+    clearSettingsMemo()
+    const res = await call('/api/v1/pubmed/search?term=keyed')
+    expect(res.status).toBe(200)
+    const url = new URL(eutils.urls.at(-1)!)
+    expect(url.searchParams.get('api_key')).toBe('NCBI1234567890')
+    expect(url.host).toBe('eutils.ncbi.nlm.nih.gov')
+    // key 不进缓存键：换个 term 不该因为配了 key 就换维度
+    expect(url.searchParams.get('term')).toBe('keyed')
+
+    await putSettings(env, { 'ncbi.api_key': 'bad' })
+    clearSettingsMemo()
+    const unkeyed = await call('/api/v1/pubmed/search?term=unkeyed')
+    expect(unkeyed.status).toBe(200)
+    expect(new URL(eutils.urls.at(-1)!).searchParams.get('api_key')).toBeNull()
+    await putSettings(env, { 'ncbi.api_key': '' })
+    clearSettingsMemo()
+  })
+
+  it('/status 里 pubmed 报 auth_optional，pypi/npm 纯零 key', async () => {
+    const body = (await (await call('/status')).json()) as {
+      providers: { name: string; status: string; auth_optional?: boolean; auth_required?: boolean }[]
+    }
+    const pubmed = body.providers.find((p) => p.name === 'pubmed')!
+    expect(pubmed.status).toBe('active')
+    expect(pubmed.auth_required).toBe(false)
+    expect(pubmed.auth_optional).toBe(true)
+    for (const name of ['pypi', 'npm']) {
+      const entry = body.providers.find((p) => p.name === name)!
+      expect(entry.status).toBe('active')
+      // auth_optional 是布尔字段：这两个源没声明 auth，等价于 false
+      expect(entry.auth_optional).toBe(false)
+    }
+  })
+
+  it('openapi.json 与 llms.txt 覆盖 12 个 provider', async () => {
+    const doc = (await (await call('/openapi.json')).json()) as { paths: Record<string, unknown> }
+    expect(Object.keys(doc.paths)).toEqual(
+      expect.arrayContaining([
+        '/api/v1/pypi/project/{package}',
+        '/api/v1/pypi/release/{package}/{version}',
+        '/api/v1/npm/latest/{name}',
+        '/api/v1/npm/version/{name}/{version}',
+        '/api/v1/npm/search',
+        '/api/v1/pubmed/search',
+        '/api/v1/pubmed/summary',
+      ]),
+    )
+    const text = await (await call('/llms.txt')).text()
+    expect(text).toContain('/api/v1/pypi/project/')
+    expect(text).toContain('/api/v1/npm/search')
+    expect(text).toContain('/api/v1/pubmed/search')
+  })
+})
+
+describe('每日额度对直连源也是硬上限', () => {
+  function messageFor(target: { op: string; id: string; query: [string, string][] }, provider: string, resource: 'feed' | 'item' | 'search') {
+    return {
+      id: crypto.randomUUID(),
+      timestamp: new Date(),
+      attempts: 1,
+      body: { v: 1 as const, k: cacheKeyFor(provider, resource, target), p: provider, t: encodeTarget(target) },
+    } as Parameters<typeof createMessageBatch>[1][number]
+  }
+
+  async function consume(target: { op: string; id: string; query: [string, string][] }, provider: string, resource: 'feed' | 'item' | 'search') {
+    const batch = createMessageBatch('uapis-refresh', [messageFor(target, provider, resource)])
+    const result = await handleQueueBatch(batch, env)
+    await getQueueResult(batch, createExecutionContext())
+    return result
+  }
+
+  it('每次回源扣 1，命中缓存不再扣', async () => {
+    await resetCredits(env, 'lobsters', 'default')
+    const before = (await readCredits(env, 'lobsters', 'default')).used
+
+    const first = await call('/api/v1/lobsters/tag/billing')
+    expect(first.status).toBe(200)
+    expect(first.headers.get('x-cache')).toBe('REFRESH')
+    expect((await readCredits(env, 'lobsters', 'default')).used).toBe(before + 1)
+
+    const second = await call('/api/v1/lobsters/tag/billing')
+    expect(['HIT', 'HIT-T1']).toContain(second.headers.get('x-cache'))
+    expect((await readCredits(env, 'lobsters', 'default')).used).toBe(before + 1)
+  })
+
+  it('额度打满：503 QUOTA_EXHAUSTED，且一次上游都不打', async () => {
+    const limit = (await readCredits(env, 'itunes', 'default')).limit
+    expect(limit).toBe(9000)
+    await resetCredits(env, 'itunes', 'default')
+    expect(await consumeCredits(env, 'itunes', 'default', limit)).toBe(true)
+    expect((await readCredits(env, 'itunes', 'default')).remaining).toBe(0)
+
+    const before = itunes.urls.length
+    const res = await call('/api/v1/itunes/search?term=exhausted')
+    expect(res.status).toBe(503)
+    const body = (await res.json()) as { code: string; details: Record<string, unknown> }
+    expect(body.code).toBe('QUOTA_EXHAUSTED')
+    expect(body.details).toMatchObject({ provider: 'itunes' })
+    expect(res.headers.get('retry-after')).toBeTruthy()
+    expect(itunes.urls.length).toBe(before)
+
+    await resetCredits(env, 'itunes', 'default')
+  })
+
+  it('非法参数 400 不消耗额度（buildPlan 在记账之前）', async () => {
+    await resetCredits(env, 'crossref', 'default')
+    const bad = await call('/api/v1/crossref/search?query=x&sort=random')
+    expect(bad.status).toBe(400)
+    expect((await readCredits(env, 'crossref', 'default')).used).toBe(0)
+  })
+
+  it('队列侧同样被额度挡住：消息丢弃不重试，也不出网', async () => {
+    const limit = (await readCredits(env, 'lobsters', 'default')).limit
+    await resetCredits(env, 'lobsters', 'default')
+    await consumeCredits(env, 'lobsters', 'default', limit)
+    const before = lobsters.urls.length
+
+    const stats = await consume({ op: 'tag', id: 'quota', query: [] }, 'lobsters', 'feed')
+    expect(stats).toEqual({ processed: 1, refreshed: 0, retried: 0, dropped: 1 })
+    expect(lobsters.urls.length).toBe(before)
+
+    await resetCredits(env, 'lobsters', 'default')
+  })
+
+  it('/status 给直连源报当天额度，tier C 仍走 channels', async () => {
+    await resetCredits(env, 'hackernews', 'default')
+    await consumeCredits(env, 'hackernews', 'default', 7)
+    const body = (await (await call('/status')).json()) as {
+      providers: {
+        name: string
+        credits: { used: number; limit: number; remaining: number } | null
+        channels: unknown[] | null
+      }[]
+    }
+    const hn = body.providers.find((p) => p.name === 'hackernews')!
+    expect(hn.channels).toBeNull()
+    expect(hn.credits?.used).toBeGreaterThanOrEqual(7)
+    expect(hn.credits?.limit).toBe(10000)
+    expect(hn.credits?.remaining).toBe(hn.credits!.limit - hn.credits!.used)
+
+    // tier C 不报 provider 维度额度，避免和通道额度两处数字打架
+    expect(body.providers.find((p) => p.name === 'economist')!.credits).toBeNull()
+    await resetCredits(env, 'hackernews', 'default')
   })
 })
 

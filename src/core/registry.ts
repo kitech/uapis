@@ -123,6 +123,26 @@ export function egressHostsOf(provider: ProviderDef): string[] {
 }
 
 /** 上线前的自检：operationId 唯一、host 已进白名单、路径参数与声明一致 */
+/**
+ * 每日额度下限：`quota.<provider>.default` 必须在代码默认值里存在且大于 0。
+ * 0 表示不限，而"忘了配"和"故意不限"在效果上一样——都是这个源没有任何硬上限，
+ * 所以这里要求显式给出数字。tier C 记在通道维度（`quota.proxy.*`），不参与本检查。
+ */
+export function missingQuotaDefaults(
+  settingsDefaults: Readonly<Record<string, string>>,
+): string[] {
+  const missing: string[] = []
+  for (const provider of REGISTRY) {
+    if (provider.tier === 'C') continue
+    const raw = settingsDefaults[`quota.${provider.name}.default`]
+    const limit = Number.parseInt(raw ?? '', 10)
+    if (!Number.isFinite(limit) || limit <= 0) {
+      missing.push(`${provider.name}: quota.${provider.name}.default 缺失或非正数（回源将不受限）`)
+    }
+  }
+  return missing
+}
+
 export function validateRegistry(
   allowlist: string[],
 ): { ok: boolean; problems: string[] } {

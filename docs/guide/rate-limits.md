@@ -6,7 +6,7 @@
 | --- | --- | --- | --- |
 | 入口限流 | 按 `cf-connecting-ip` 的固定窗口 | 60 次/分钟 | 隔离实例内存 |
 | provider 闸门 | 上游请求最小间隔 | registry 里每个 provider 自带（当前 300ms） | D1 `gate` 表 |
-| 额度计数 | 每天每个 provider / 队列 / 付费通道的调用次数 | SE 9500、HN 10000、GH 4500、DEV 9000、arXiv 4000、lobsters 6000、iTunes 9000、Crossref 5000、队列 3000、ZenRows 33、Jina 50 | D1 `quota` 表（按天） |
+| 额度计数 | 每天每个 provider / 队列 / 付费通道的调用次数 | SE 9500、HN 10000、GH 4500、DEV 9000、arXiv 4000、lobsters 6000、iTunes 9000、Crossref 5000、PyPI 6000、npm 8000、PubMed 10000、队列 3000、ZenRows 33、Jina 50 | D1 `quota` 表（按天） |
 
 三层都可以用 `/admin/settings` 调：
 
@@ -18,6 +18,7 @@
 | `queue.soft_limit` | 队列软上限，超过后 `/status` 标记 `throttled` |
 | `quota.<provider>.<channel>` | 单 provider 单 channel 的每日额度；`proxy.zenrows` / `proxy.jina` 是付费通道额度 |
 | `crossref.mailto` | 可选，填合法邮箱即带 `mailto` 进 Crossref polite pool；填错当没配 |
+| `ncbi.api_key` | 可选，NCBI E-utilities API key（3 → 10 次/秒）；填合法值才带上，填错当没配，不进缓存键 |
 | `cache.soft_rows` | D1 缓存行软上限，超过后只允许覆盖已有行 |
 | `cache.negative_ttl` | 负缓存秒数，默认 21600（6h） |
 
@@ -64,11 +65,32 @@ tier C 源（The Economist）不直连，每次回源都要花钱，所以额度
 
 ## 免费额度边界
 
-> 现状说明：`quota.<provider>.default` 目前是**配额声明**——`/status` 与
-> `/admin/quota` 能读到，付费通道（`quota.proxy.*`）是每次回源真的扣、
-> 扣到 0 就 503。零 key 源（HN / SE / GitHub / DEV / arXiv / 新增三个）还没接上扣减点，
-> 它们真正的保护是 provider 闸门 + 缓存命中率。要不要给它们也加上硬扣减，
-> 属于待定的策略问题：加了会在突发流量下直接 503。
+每次**真正回源**（含内联与队列消费）扣 1，扣到 0 就不再打上游，直接
+`503 QUOTA_EXHAUSTED` + `Retry-After: 3600`：
+
+| 维度 | 记在哪 | 说明 |
+| --- | --- | --- |
+| 直连源 | `quota.<provider>.default` | HN 10000、SE 9500、GH 4500、DEV 9000、arXiv 4000、lobsters 6000、iTunes 9000、Crossref 5000、PyPI 6000、npm 8000、PubMed 10000 |
+| 付费通道（tier C） | `quota.proxy.zenrows` / `quota.proxy.jina` | 记在**实际选中**的那条通道上 |
+
+计费点的位置有讲究：
+
+- **在闸门之后、`buildPlan()` 之后**——非法参数（400）永远不消耗额度
+- **在缓存命中路径之外**——命中 T1/T2 一次都不扣，所以额度实际消耗 ≈ 上游请求数，
+  热门 key 基本不花钱
+- **内部重试算 1 次**：`fetchUpstream` 自己的 5xx/429 退避重试不再单独扣，
+  免得一次故障把当天额度打光
+- **不写负缓存**：额度是我们自己的状态，不是上游的。等日切或调大额度就会恢复，
+  缓存一个 503 只会让恢复之后还继续报错
+
+`validateRegistry` 的配套自检 `missingQuotaDefaults()` 要求每个直连 provider
+都有正的 `quota.<name>.default`：`0` 表示不限，而"忘了配"和"故意不限"效果一样，
+所以都算漏配，单元测试会红。tier C 不参与这项检查（它记在通道维度）。
+
+`/status` 的 `providers[].credits` 对直连源一律给出 `used/limit/remaining`；
+tier C 报 `null`，真实用量看 `providers[].channels[].credits`，避免两处数字打架。
+调额度用 `PUT /admin/settings`（`quota.<provider>.default`），
+误扣多了用 `POST /admin/quota/reset {"provider":"hackernews"}`。
 
 | 资源 | 免费额度 | 本项目的设计目标 |
 | --- | --- | --- |
