@@ -11,6 +11,9 @@ import { def as lobstersDef, runtime as lobstersRuntime } from './lobsters'
 import { def as npmDef, runtime as npmRuntime } from './npm'
 import { def as pypiDef, runtime as pypiRuntime } from './pypi'
 import { def as pubmedDef, runtime as pubmedRuntime } from './pubmed'
+import { def as usgsDef, runtime as usgsRuntime } from './usgs'
+import { def as gitlabDef, runtime as gitlabRuntime } from './gitlab'
+import { def as cratesDef, runtime as cratesRuntime } from './crates'
 import { def as stackexchangeDef, runtime as stackexchangeRuntime } from './stackexchange'
 
 /** 路由、OpenAPI、/status 与文档的唯一数据源 */
@@ -27,6 +30,9 @@ export const providers: ProviderDef[] = [
   pypiDef,
   npmDef,
   pubmedDef,
+  usgsDef,
+  gitlabDef,
+  cratesDef,
 ]
 
 const runtimes = new Map<string, ProviderRuntime>(
@@ -43,6 +49,9 @@ const runtimes = new Map<string, ProviderRuntime>(
     pypiRuntime,
     npmRuntime,
     pubmedRuntime,
+    usgsRuntime,
+    gitlabRuntime,
+    cratesRuntime,
   ].map(
     (runtime) => [runtime.name, runtime],
   ),

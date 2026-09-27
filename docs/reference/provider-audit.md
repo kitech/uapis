@@ -163,6 +163,53 @@
 - 归属：题录版权归作者与出版商，PubMed 只做索引
 - 额度：`quota.pubmed.default` = 10000
 
+### usgs · tier A ✅
+
+- 上游：`https://earthquake.usgs.gov/fdsnws/event/1`
+- 凭据：零 key；数据属美国联邦政府**公有领域**；
+  使用说明 <https://earthquake.usgs.gov/fdsnws/event/1/>、
+  版权与署名 <https://www.usgs.gov/information-policies-and-instructions/copyrights-and-credits>
+- 端点：`earthquakes`（FDSN `/query`，feed 档，透传 GeoJSON）、
+  `earthquakes/{id}`（单事件，item 档，约 6KB）
+- **不用 `feed/v1.0/summary/*.geojson`**：固定 feed 体积跨度过大
+  （all_hour 4.6KB → all_month **7.5MB**），且实测拼错路径上游回
+  **200 + `404 File Not Found` 纯文本**；`/query` 可控（limit=200 → 145KB）
+- `limit` 硬卡 200；`minmagnitude` 是小数而框架只校验 `integer`，
+  格式与 0-10 区间在 runtime 兜住
+- 超时 8s + 关闭重试（实测 limit=200 需 4.8s，3s 默认超时不够）
+- 事件 id 白名单 `^[a-z0-9]{5,20}$`；形态合法但不存在的 id 由上游回 404，不猜成 400
+- 闸门 1000ms；额度：`quota.usgs.default` = 4000
+
+### gitlab · tier A- ✅
+
+- 上游：`https://gitlab.com/api/v4`
+- 凭据：公开项目**零 key**；文档 <https://docs.gitlab.com/ee/api/>、
+  条款 <https://about.gitlab.com/terms/>
+- 端点：`projects`（搜索，search 档）、`project/{id}`（profile 档）、
+  `commits`（feed 档），均透传 JSON
+- 只接**只读公开**端点：私有项目、MR、issue 写操作一概不碰
+- `project/{id}` 走 `multiSegment`（子组可多层），runtime 负责编成上游要的
+  单段 URL 编码形式 `group%2Fsub%2Fproject`；数字项目 id 原样透传
+- `commits` 的 `project` 放 query 而非路径，避免与贪婪多段参数抢路由
+- 搜索固定 `simple=true` 精简字段（20 个项目约 28KB）
+- 匿名配额实测 `ratelimit-limit: 500`/分钟/IP；闸门 200ms；额度 `quota.gitlab.default` = 5000
+- 归属：项目元数据与代码版权归各项目作者/组织，GitLab 只做托管与索引
+
+### crates · tier A- ✅
+
+- 上游：`https://crates.io/api/v1`
+- 凭据：零 key，但**要求可识别的 User-Agent**（本项目发 `uapis/1.0 (+SITE_URL)`）；
+  数据访问文档 <https://crates.io/data-access>、站点条款 <https://crates.io/policies>
+- 端点：`crate/{name}`（**transform**）、`crate/{name}/{version}`（透传，1.7KB）、
+  `search`（透传，2.1KB）
+- `crate` 做 transform 的原因同 PyPI：**99% 体积是 `versions`**
+  （serde 441KB / 316 版；windows-sys 上游 506KB，已贴着 512KB 上限），
+  折叠成 `{num, yanked, created_at, downloads, license, rust_version, checksum, crate_size}`
+  后：windows-sys 506KB → 6.5KB、serde 441KB → 77KB、rand 139KB → 24KB
+- 官方未公布硬性限流但要求合理使用，共享资源别打太密：闸门 1000ms；
+  额度 `quota.crates.default` = 3000
+- 归属：crate 元数据与代码版权归各发布者，crates.io 只做索引与托管
+
 ### economist · tier C ⚠️ 需自行确认条款
 
 - 目标 host：`www.economist.com`——**我们不直连**，只作为 `proxy.host` 的校验对象；
@@ -190,9 +237,13 @@
 - **需 key 源**（tier B）：F-Droid、YouTube Data API、Phonark/Last.fm、Telegram Bot API
 
 > 说明：dev.to / GitHub / arXiv 已于 P2 接入，lobsters / itunes / crossref 于 P4 接入，
-> PyPI / npm registry / PubMed 于 P5 接入（见上）。
-> Wikipedia、Open Library、YouTube、Docker Hub、F-Droid 在开发机上网络不通（连接超时），
-> MusicBrainz 503、crates.io 403（UA 拦截），因此没有凭印象写进来。
+> PyPI / npm registry / PubMed 于 P5 接入，USGS / GitLab / crates.io 于 P6 接入（见上）。
+> P6 的探测结论（**都实测过，不是凭印象**）：
+> crates.io 之前记的"403 UA 拦截"是**探测姿势问题**——带上项目的诚实 UA 就能通；
+> 反而是被我们探测脚本漏掉的 `gitlab.com` 与 `earthquake.usgs.gov` 一直可用。
+> Wikipedia、Open Library、Docker Hub、F-Droid 仍然连接超时；
+> MusicBrainz 503（服务器忙）；NWS `api.weather.gov` 的 `/alerts/active` 无参调用
+> **1MB 且 20s 超时**（`limit` 参数还报 400），体积不适合做缓存条目。
 > 接任何新源之前必须先 curl 一遍确认能通、能拿到预期结构，
 > 并按单响应 512KB 上限决定是透传还是 transform。
 - **付费墙源**（tier C）：机制已就绪（ZenRows / Jina 双通道、额度、tier C 校验），

@@ -5,8 +5,8 @@
 | 层 | 作用对象 | 默认值 | 存储 |
 | --- | --- | --- | --- |
 | 入口限流 | 按 `cf-connecting-ip` 的固定窗口 | 60 次/分钟 | 隔离实例内存 |
-| provider 闸门 | 上游请求最小间隔 | registry 里每个 provider 自带（当前 300ms） | D1 `gate` 表 |
-| 额度计数 | 每天每个 provider / 队列 / 付费通道的调用次数 | SE 9500、HN 10000、GH 4500、DEV 9000、arXiv 4000、lobsters 6000、iTunes 9000、Crossref 5000、PyPI 6000、npm 8000、PubMed 10000、队列 3000、ZenRows 33、Jina 50 | D1 `quota` 表（按天） |
+| provider 闸门 | 上游请求最小间隔 | registry 里每个 provider 自带（200ms - 1000ms，按各上游的公共服务属性分档） | D1 `gate` 表 |
+| 额度计数 | 每天每个 provider / 队列 / 付费通道的调用次数 | SE 9500、HN 10000、GH 4500、DEV 9000、arXiv 4000、lobsters 6000、iTunes 9000、Crossref 5000、PyPI 6000、npm 8000、PubMed 10000、USGS 4000、GitLab 5000、crates.io 3000、队列 3000、ZenRows 33、Jina 50 | D1 `quota` 表（按天） |
 
 三层都可以用 `/admin/settings` 调：
 
@@ -70,7 +70,7 @@ tier C 源（The Economist）不直连，每次回源都要花钱，所以额度
 
 | 维度 | 记在哪 | 说明 |
 | --- | --- | --- |
-| 直连源 | `quota.<provider>.default` | HN 10000、SE 9500、GH 4500、DEV 9000、arXiv 4000、lobsters 6000、iTunes 9000、Crossref 5000、PyPI 6000、npm 8000、PubMed 10000 |
+| 直连源 | `quota.<provider>.default` | HN 10000、SE 9500、GH 4500、DEV 9000、arXiv 4000、lobsters 6000、iTunes 9000、Crossref 5000、PyPI 6000、npm 8000、PubMed 10000、USGS 4000、GitLab 5000、crates.io 3000 |
 | 付费通道（tier C） | `quota.proxy.zenrows` / `quota.proxy.jina` | 记在**实际选中**的那条通道上 |
 
 计费点的位置有讲究：

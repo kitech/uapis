@@ -26,6 +26,9 @@ const CROSSREF = 'https://api.crossref.org'
 const PYPI = 'https://pypi.org'
 const NPM = 'https://registry.npmjs.org'
 const EUTILS = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils'
+const USGS = 'https://earthquake.usgs.gov'
+const GITLAB = 'https://gitlab.com'
+const CRATES = 'https://crates.io'
 
 const ECONOMIST_HTML = `<html><head><title>Fallback</title>
   <meta property="og:title" content="Paywalled &amp; locked">
@@ -70,6 +73,9 @@ let crossref: { urls: string[] }
 let pypi: { urls: string[] }
 let npm: { urls: string[] }
 let eutils: { urls: string[] }
+let usgs: { urls: string[] }
+let gitlab: { urls: string[] }
+let crates: { urls: string[] }
 
 /** 每次测试都从这组默认 handler 开始，用例内的 network.use 不会污染后续用例 */
 function defaultHandlers(): ReturnType<typeof http.get>[] {
@@ -219,6 +225,55 @@ function defaultHandlers(): ReturnType<typeof http.get>[] {
         },
       })
     }),
+    // USGS 的 search 与 event 是同一个 /query 端点，靠 eventid 参数区分
+    http.get(`${USGS}/fdsnws/event/1/query`, ({ request }) => {
+      usgs.urls.push(request.url)
+      const url = new URL(request.url)
+      const feature = {
+        type: 'Feature',
+        id: url.searchParams.get('eventid') ?? 'ci41339847',
+        properties: { mag: 4.7, place: '10 km N of Foo, CA', time: 1790510206410, status: 'reviewed', tsunami: 0, sig: 320, net: 'ci' },
+        geometry: { type: 'Point', coordinates: [-121.5, 36.2, 8.3] },
+      }
+      if (url.searchParams.has('eventid')) return HttpResponse.json(feature)
+      return HttpResponse.json({
+        type: 'FeatureCollection',
+        metadata: { generated: 1790511508000, count: 1 },
+        features: [feature],
+      })
+    }),
+    // GitLab：项目 id 在上游是单段 URL 编码形式（group%2Fsub%2Fproject）
+    http.get(`${GITLAB}/api/v4/projects`, ({ request }) => {
+      gitlab.urls.push(request.url)
+      return HttpResponse.json([{ id: 1885018, name: 'rust', path_with_namespace: 'rust-lang/rust' }])
+    }),
+    http.get(`${GITLAB}/api/v4/projects/:id`, ({ request, params }) => {
+      gitlab.urls.push(request.url)
+      return HttpResponse.json({ id: 1885018, path_with_namespace: decodeURIComponent(String(params.id)) })
+    }),
+    http.get(`${GITLAB}/api/v4/projects/:id/repository/commits`, ({ request, params }) => {
+      gitlab.urls.push(request.url)
+      return HttpResponse.json([{ id: 'b373574e', short_id: 'b373574e', title: 'fix: borrow checker', project: decodeURIComponent(String(params.id)) }])
+    }),
+    http.get(`${CRATES}/api/v1/crates`, ({ request }) => {
+      crates.urls.push(request.url)
+      return HttpResponse.json({ crates: [{ id: 'serde', name: 'serde', max_version: '1.0.229', downloads: 100 }], meta: { total: 1 } })
+    }),
+    http.get(`${CRATES}/api/v1/crates/:name`, ({ request, params }) => {
+      crates.urls.push(request.url)
+      return HttpResponse.json({
+        crate: { id: params.name, name: params.name, description: 'A generic serialization framework', max_version: '1.0.229', newest_version: '1.0.229', num_versions: 2, downloads: 100, repository: 'https://github.com/serde-rs/serde', categories: ['encoding'] },
+        versions: [
+          { num: '1.0.229', created_at: '2026-07-18T23:05:13Z', downloads: 900, yanked: false, license: 'MIT OR Apache-2.0', rust_version: '1.56', features: { derive: ['serde_derive'], std: [] }, links: { owners: '/api/v1/crates/serde/owners' }, audit_actions: { publish: null } },
+          { num: '1.0.228', created_at: '2026-06-01T00:00:00Z', downloads: 10, yanked: true, features: { derive: ['serde_derive'] } },
+        ],
+        keywords: ['serde', 'serialization'],
+      })
+    }),
+    http.get(`${CRATES}/api/v1/crates/:name/:version`, ({ request, params }) => {
+      crates.urls.push(request.url)
+      return HttpResponse.json({ version: { num: params.version, crate: params.name, downloads: 900, license: 'MIT OR Apache-2.0', features: { derive: ['serde_derive'] } } })
+    }),
     // DOI 天然多段，MSW 的 `:doi{.+}` 匹配不到多段路径，用正则整段匹配
     http.get(/api\.crossref\.org\/works\/.+/, ({ request }) => {
       crossref.urls.push(request.url)
@@ -244,6 +299,9 @@ beforeAll(async () => {
   pypi = { urls: [] }
   npm = { urls: [] }
   eutils = { urls: [] }
+  usgs = { urls: [] }
+  gitlab = { urls: [] }
+  crates = { urls: [] }
   // 测试里不真实限速：把 provider 闸门间隔压到 0
   await putSettings(env, { 'gate.min_ms': '0' })
   clearSettingsMemo()
@@ -270,6 +328,9 @@ afterEach(() => {
   pypi.urls = []
   npm.urls = []
   eutils.urls = []
+  usgs.urls = []
+  gitlab.urls = []
+  crates.urls = []
 })
 
 // 限流是 isolate 内的固定窗口计数器，不清的话用例数一多就会互相踩出 429
@@ -320,9 +381,11 @@ describe('元数据端点', () => {
     expect(body.providers.map((p) => p.name).sort()).toEqual([
       'arxiv',
       'crossref',
+      'crates',
       'devto',
       'economist',
       'github',
+      'gitlab',
       'hackernews',
       'itunes',
       'lobsters',
@@ -330,6 +393,7 @@ describe('元数据端点', () => {
       'pypi',
       'pubmed',
       'stackexchange',
+      'usgs',
     ].sort())
     expect(body.providers.find((p) => p.name === 'stackexchange')?.status).toBe('unconfigured')
     // 端点级 optional：没配 key 也算 active
@@ -990,7 +1054,262 @@ describe('P5 包管理与文献检索源', () => {
     }
   })
 
-  it('openapi.json 与 llms.txt 覆盖 12 个 provider', async () => {
+  it('usgs search：固定 format=geojson，只放行 minmagnitude/limit/orderby', async () => {
+    const res = await call('/api/v1/usgs/earthquakes')
+    expect(res.status).toBe(200)
+    const url = new URL(usgs.urls.at(-1)!)
+    expect(url.pathname).toBe('/fdsnws/event/1/query')
+    expect(url.searchParams.get('format')).toBe('geojson')
+    expect(url.searchParams.get('minmagnitude')).toBe('2.5')
+    expect(url.searchParams.get('limit')).toBe('20')
+    expect(url.searchParams.get('orderby')).toBe('time')
+    const body = (await res.json()) as { type: string; features: unknown[] }
+    expect(body.type).toBe('FeatureCollection')
+    expect(body.features).toHaveLength(1)
+
+    const custom = await call('/api/v1/usgs/earthquakes?minmagnitude=4.5&limit=50&orderby=magnitude')
+    expect(custom.status).toBe(200)
+    const customUrl = new URL(usgs.urls.at(-1)!)
+    expect(customUrl.searchParams.get('minmagnitude')).toBe('4.5')
+    expect(customUrl.searchParams.get('limit')).toBe('50')
+    expect(customUrl.searchParams.get('orderby')).toBe('magnitude')
+  })
+
+  it('usgs 非法震级/排序/limit 一律 400，不回源', async () => {
+    const before = usgs.urls.length
+    for (const path of [
+      '/api/v1/usgs/earthquakes?minmagnitude=abc',
+      '/api/v1/usgs/earthquakes?minmagnitude=-1',
+      '/api/v1/usgs/earthquakes?minmagnitude=11',
+      '/api/v1/usgs/earthquakes?limit=0',
+      '/api/v1/usgs/earthquakes?limit=201',
+      '/api/v1/usgs/earthquakes?orderby=depth',
+      '/api/v1/usgs/earthquakes?minmagnitude=4&evil=1',
+    ]) {
+      const res = await call(path)
+      expect(res.status).toBe(400)
+      expect(((await res.json()) as { code: string }).code).toBe('INVALID_PARAMETER')
+    }
+    expect(usgs.urls.length).toBe(before)
+  })
+
+  it('usgs event：eventid 走 /query，非法 id 400', async () => {
+    const res = await call('/api/v1/usgs/earthquakes/ci41339847')
+    expect(res.status).toBe(200)
+    const url = new URL(usgs.urls.at(-1)!)
+    expect(url.searchParams.get('eventid')).toBe('ci41339847')
+    expect(url.searchParams.get('format')).toBe('geojson')
+    const body = (await res.json()) as { type: string; id: string }
+    expect(body.type).toBe('Feature')
+    expect(body.id).toBe('ci41339847')
+
+    const before = usgs.urls.length
+    for (const path of [
+      '/api/v1/usgs/earthquakes/CI41339847',
+      '/api/v1/usgs/earthquakes/ci-41339847',
+      '/api/v1/usgs/earthquakes/ci_413',
+      '/api/v1/usgs/earthquakes/ci4133984712345678901',
+      '/api/v1/usgs/earthquakes/ci41339847%20bad',
+      '/api/v1/usgs/earthquakes/..%2F..%2Fetc',
+    ]) {
+      const bad = await call(path)
+      expect(bad.status).toBe(400)
+      expect(((await bad.json()) as { code: string }).code).toBe('INVALID_PARAMETER')
+    }
+    expect(usgs.urls.length).toBe(before)
+  })
+
+  it('gitlab project：多层子组走多段路由，上游是单段 URL 编码', async () => {
+    const flat = await call('/api/v1/gitlab/project/rust-lang/rust')
+    expect(flat.status).toBe(200)
+    expect(gitlab.urls.at(-1)).toBe('https://gitlab.com/api/v4/projects/rust-lang%2Frust')
+
+    const deep = await call('/api/v1/gitlab/project/group/subgroup/project')
+    expect(deep.status).toBe(200)
+    expect(gitlab.urls.at(-1)).toBe('https://gitlab.com/api/v4/projects/group%2Fsubgroup%2Fproject')
+
+    const numeric = await call('/api/v1/gitlab/project/1885018')
+    expect(numeric.status).toBe(200)
+    expect(gitlab.urls.at(-1)).toBe('https://gitlab.com/api/v4/projects/1885018')
+  })
+
+  it('gitlab project 非法路径 400，不回源', async () => {
+    const before = gitlab.urls.length
+    for (const path of [
+      '/api/v1/gitlab/project/..%2F..%2Fetc',
+      '/api/v1/gitlab/project/group%20name/project',
+      '/api/v1/gitlab/project/-leading',
+    ]) {
+      const res = await call(path)
+      expect(res.status).toBe(400)
+      expect(((await res.json()) as { code: string }).code).toBe('INVALID_PARAMETER')
+    }
+    expect(gitlab.urls.length).toBe(before)
+  })
+
+  it('gitlab 搜索只放行白名单参数，默认按最近活动倒序', async () => {
+    const bad = await call('/api/v1/gitlab/projects?q=rust&evil=1')
+    expect(bad.status).toBe(400)
+    expect(gitlab.urls).toHaveLength(0)
+
+    const res = await call('/api/v1/gitlab/projects?q=rust%20wasm&limit=5&order_by=name&sort=asc')
+    expect(res.status).toBe(200)
+    const url = new URL(gitlab.urls.at(-1)!)
+    expect(url.pathname).toBe('/api/v4/projects')
+    expect(url.searchParams.get('search')).toBe('rust wasm')
+    expect(url.searchParams.get('per_page')).toBe('5')
+    expect(url.searchParams.get('simple')).toBe('true')
+    expect(url.searchParams.get('order_by')).toBe('name')
+    expect(url.searchParams.get('sort')).toBe('asc')
+
+    const fallback = await call('/api/v1/gitlab/projects?q=rust')
+    const fallbackUrl = new URL(gitlab.urls.at(-1)!)
+    expect(fallbackUrl.searchParams.get('order_by')).toBe('last_activity_at')
+    expect(fallbackUrl.searchParams.get('sort')).toBe('desc')
+  })
+
+  it('gitlab commits：项目走 query，ref 只在给了才带', async () => {
+    const plain = await call('/api/v1/gitlab/commits?project=rust-lang%2Frust')
+    expect(plain.status).toBe(200)
+    const url = new URL(gitlab.urls.at(-1)!)
+    expect(url.pathname).toBe('/api/v4/projects/rust-lang%2Frust/repository/commits')
+    expect(url.searchParams.get('per_page')).toBe('20')
+    expect(url.searchParams.get('ref_name')).toBeNull()
+
+    const withRef = await call('/api/v1/gitlab/commits?project=rust-lang%2Frust&ref=main&limit=3')
+    expect(withRef.status).toBe(200)
+    const refUrl = new URL(gitlab.urls.at(-1)!)
+    expect(refUrl.searchParams.get('ref_name')).toBe('main')
+    expect(refUrl.searchParams.get('per_page')).toBe('3')
+  })
+
+  it('gitlab 非法 project/ref/排序 400，不回源', async () => {
+    const before = gitlab.urls.length
+    for (const path of [
+      '/api/v1/gitlab/projects?q=',
+      '/api/v1/gitlab/projects?q=%3Cscript%3E',
+      '/api/v1/gitlab/projects?q=rust&order_by=size',
+      '/api/v1/gitlab/projects?q=rust&sort=random',
+      '/api/v1/gitlab/projects?q=rust&limit=101',
+      '/api/v1/gitlab/commits?project=..%2F..',
+      '/api/v1/gitlab/commits?project=rust-lang%2Frust&ref=a..b',
+      '/api/v1/gitlab/commits',
+    ]) {
+      const res = await call(path)
+      expect(res.status).toBe(400)
+      expect(((await res.json()) as { code: string }).code).toBe('INVALID_PARAMETER')
+    }
+    expect(gitlab.urls.length).toBe(before)
+  })
+
+  it('crates crate：versions 折叠成精简数组（丢掉 features/links 等大字段）', async () => {
+    const res = await call('/api/v1/crates/crate/serde')
+    expect(res.status).toBe(200)
+    expect(crates.urls.at(-1)).toBe('https://crates.io/api/v1/crates/serde')
+    const body = (await res.json()) as {
+      provider: string
+      name: string
+      max_version: string
+      description: string
+      keywords: string[]
+      versions: { num: string; yanked?: boolean; downloads?: number; features?: unknown; links?: unknown }[]
+    }
+    expect(body.provider).toBe('crates')
+    expect(body.name).toBe('serde')
+    expect(body.max_version).toBe('1.0.229')
+    expect(body.description).toBe('A generic serialization framework')
+    expect(body.keywords).toEqual(['serde', 'serialization'])
+    expect(body.versions.map((entry) => entry.num)).toEqual(['1.0.229', '1.0.228'])
+    // 上游每个版本还带 features/links/audit_actions，折叠后一律不留
+    for (const entry of body.versions) {
+      expect(entry.features).toBeUndefined()
+      expect(entry.links).toBeUndefined()
+    }
+    expect(body.versions[0]).toMatchObject({ num: '1.0.229', yanked: false, downloads: 900, license: 'MIT OR Apache-2.0' })
+    expect(body.versions[1]).toMatchObject({ num: '1.0.228', yanked: true })
+    // 折叠后每个版本只剩白名单字段，体积必须显著小于上游（上游 serde 是 441KB）
+    for (const entry of body.versions) {
+      for (const key of Object.keys(entry)) {
+        expect(['num', 'yanked', 'created_at', 'downloads', 'license', 'rust_version', 'checksum', 'crate_size']).toContain(key)
+      }
+    }
+    expect(JSON.stringify(body).length).toBeLessThan(600)
+  })
+
+  it('crates version 与 search：URL 形态与参数白名单', async () => {
+    const version = await call('/api/v1/crates/crate/serde/1.0.229')
+    expect(version.status).toBe(200)
+    expect(crates.urls.at(-1)).toBe('https://crates.io/api/v1/crates/serde/1.0.229')
+    // 单版本保持 passthrough：features 这种字段要留着
+    const versionBody = (await version.json()) as { version: { features: unknown } }
+    expect(versionBody.version.features).toEqual({ derive: ['serde_derive'] })
+
+    const search = await call('/api/v1/crates/search?q=serde&limit=3&sort=downloads')
+    expect(search.status).toBe(200)
+    const url = new URL(crates.urls.at(-1)!)
+    expect(url.pathname).toBe('/api/v1/crates')
+    expect(url.searchParams.get('q')).toBe('serde')
+    expect(url.searchParams.get('per_page')).toBe('3')
+    expect(url.searchParams.get('sort')).toBe('downloads')
+  })
+
+  it('crates 非法 crate 名/版本/排序 400，不回源', async () => {
+    const before = crates.urls.length
+    for (const path of [
+      '/api/v1/crates/crate/1serde',
+      '/api/v1/crates/crate/Serde%20Core',
+      '/api/v1/crates/crate/serde/1.0.229%20bad',
+      '/api/v1/crates/crate/ser%20de',
+      '/api/v1/crates/search?q=',
+      '/api/v1/crates/search?q=%3Cscript%3E',
+      '/api/v1/crates/search?q=serde&sort=popular',
+    ]) {
+      const res = await call(path)
+      expect(res.status).toBe(400)
+      expect(((await res.json()) as { code: string }).code).toBe('INVALID_PARAMETER')
+    }
+    expect(crates.urls.length).toBe(before)
+    // 多出来的一段直接没有路由（404），不是 400
+    expect((await call('/api/v1/crates/crate/serde/1.0.229/extra')).status).toBe(404)
+    expect(crates.urls.length).toBe(before)
+  })
+
+  it('/status 里 usgs/gitlab/crates 都是零 key active', async () => {
+    const body = (await (await call('/status')).json()) as {
+      providers: { name: string; status: string; auth_optional?: boolean; auth_required?: boolean; credits?: { limit: number } | null }[]
+    }
+    for (const name of ['usgs', 'gitlab', 'crates']) {
+      const entry = body.providers.find((p) => p.name === name)!
+      expect(entry.status).toBe('active')
+      expect(entry.auth_required).toBe(false)
+      expect(entry.auth_optional).toBe(false)
+    }
+    expect(body.providers.find((p) => p.name === 'usgs')?.credits?.limit).toBe(4000)
+    expect(body.providers.find((p) => p.name === 'gitlab')?.credits?.limit).toBe(5000)
+    expect(body.providers.find((p) => p.name === 'crates')?.credits?.limit).toBe(3000)
+  })
+
+  it('openapi.json 与 llms.txt 覆盖 15 个 provider', async () => {
+    const doc = (await (await call('/openapi.json')).json()) as { paths: Record<string, unknown> }
+    expect(Object.keys(doc.paths)).toEqual(
+      expect.arrayContaining([
+        '/api/v1/usgs/earthquakes',
+        '/api/v1/usgs/earthquakes/{id}',
+        '/api/v1/gitlab/projects',
+        '/api/v1/gitlab/project/{id}',
+        '/api/v1/gitlab/commits',
+        '/api/v1/crates/crate/{name}',
+        '/api/v1/crates/crate/{name}/{version}',
+        '/api/v1/crates/search',
+      ]),
+    )
+    const text = await (await call('/llms.txt')).text()
+    expect(text).toContain('/api/v1/usgs/earthquakes')
+    expect(text).toContain('/api/v1/gitlab/projects')
+    expect(text).toContain('/api/v1/crates/search')
+  })
+
+  it('（P5 基线）openapi.json 与 llms.txt 覆盖 12 个 provider', async () => {
     const doc = (await (await call('/openapi.json')).json()) as { paths: Record<string, unknown> }
     expect(Object.keys(doc.paths)).toEqual(
       expect.arrayContaining([

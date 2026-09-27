@@ -19,9 +19,9 @@
   [docs/reference/design-decisions.md](docs/reference/design-decisions.md)
 - 固定上游 host 白名单 + 不可覆盖的诚实 UA，**不是**开放代理
 - 付费墙源（tier C）只走 ZenRows / Jina 付费通道，不提供免费绕过路径，也不内联回源
-- 已接入 37 个端点 / 12 个数据源：Stack Exchange 7、Hacker News 6、GitHub 3、DEV.to 3、arXiv 2、
-  The Economist 1（tier C，付费通道）、Lobsters 4、iTunes Search 2、Crossref 2、
-  PyPI 2、npm registry 3、PubMed 2
+- 已接入 45 个端点 / 15 个数据源：Stack Exchange 7、Hacker News 6、GitHub 3、GitLab 3、DEV.to 3、
+  arXiv 2、The Economist 1（tier C，付费通道）、Lobsters 4、iTunes Search 2、Crossref 2、
+  PyPI 2、npm registry 3、PubMed 2、crates.io 3、USGS 地震目录 2
 
 ## 本地开发
 
@@ -37,7 +37,7 @@ npm run dev                         # wrangler dev
 
 ```bash
 npm run typecheck
-npm test                            # vitest-pool-workers + MSW 出站拦截，全离线（173 个用例）
+npm test                            # vitest-pool-workers + MSW 出站拦截，全离线（193 个用例）
 npm run deploy:dry                  # 构建文档并 dry-run，产物需 < 64MiB
 ```
 

@@ -40,6 +40,9 @@ const ALLOWLIST = [
   'pypi.org',
   'registry.npmjs.org',
   'eutils.ncbi.nlm.nih.gov',
+  'earthquake.usgs.gov',
+  'gitlab.com',
+  'crates.io',
 ]
 
 describe('错误体与状态码映射', () => {
@@ -818,6 +821,142 @@ describe('P5 包管理与文献检索源', () => {
       expect(ALLOWLIST).toContain(host)
     }
   })
+
+  it('usgs：search 固定 format=geojson，只放行 minmagnitude/limit/orderby', async () => {
+    const rt = runtimeFor('usgs')!
+    const plan = await rt.buildPlan(env, { op: 'search', id: '', query: [] })
+    expect(plan.url).toBe(
+      'https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson&minmagnitude=2.5&limit=20&orderby=time',
+    )
+    // 慢上游：放宽超时并关掉重试，免得 2× 超时把内联请求拖成十几秒
+    expect(plan.timeoutMs).toBe(8000)
+    expect(plan.retries).toBe(0)
+    expect(
+      (await rt.buildPlan(env, { op: 'search', id: '', query: [['minmagnitude', '4.5'], ['limit', '200'], ['orderby', 'magnitude']] })).url,
+    ).toBe(
+      'https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson&minmagnitude=4.5&limit=200&orderby=magnitude',
+    )
+    // 小数震级框架不校验（type=number 没有范围检查），脏值必须在这层拒
+    for (const value of ['abc', '-1', '11', '1.2.3', '']) {
+      await expect(
+        rt.buildPlan(env, { op: 'search', id: '', query: [['minmagnitude', value]] }),
+      ).rejects.toThrow(/invalid minmagnitude/)
+    }
+    await expect(
+      rt.buildPlan(env, { op: 'search', id: '', query: [['orderby', 'depth']] }),
+    ).rejects.toMatchObject({ status: 400, details: { allowed: ['time', 'magnitude'] } })
+  })
+
+  it('usgs：event 走 eventid 查询，id 形态自己把关', async () => {
+    const rt = runtimeFor('usgs')!
+    expect((await rt.buildPlan(env, { op: 'event', id: 'ci41339847', query: [] })).url).toBe(
+      'https://earthquake.usgs.gov/fdsnws/event/1/query?eventid=ci41339847&format=geojson',
+    )
+    for (const id of ['CI41339847', 'ci_413', 'ci4133984712345678901', 'ci413 39847', '../..']) {
+      await expect(rt.buildPlan(env, { op: 'event', id, query: [] })).rejects.toThrow(/invalid event id/)
+    }
+  })
+
+  it('gitlab：多层子组项目路径编成上游要的单段形式', async () => {
+    const rt = runtimeFor('gitlab')!
+    expect((await rt.buildPlan(env, { op: 'project', id: 'rust-lang/rust', query: [] })).url).toBe(
+      'https://gitlab.com/api/v4/projects/rust-lang%2Frust',
+    )
+    expect((await rt.buildPlan(env, { op: 'project', id: 'group/sub/project', query: [] })).url).toBe(
+      'https://gitlab.com/api/v4/projects/group%2Fsub%2Fproject',
+    )
+    // 数字项目 id 原样透传，不做编码
+    expect((await rt.buildPlan(env, { op: 'project', id: '1885018', query: [] })).url).toBe(
+      'https://gitlab.com/api/v4/projects/1885018',
+    )
+    for (const id of ['group name/project', '-leading/project', '../..', 'group/../etc']) {
+      await expect(rt.buildPlan(env, { op: 'project', id, query: [] })).rejects.toThrow(/invalid project/)
+    }
+  })
+
+  it('gitlab：搜索与提交只放行白名单参数', async () => {
+    const rt = runtimeFor('gitlab')!
+    expect(
+      (await rt.buildPlan(env, { op: 'search', id: '', query: [['q', 'rust wasm'], ['limit', '5'], ['order_by', 'name'], ['sort', 'asc']] })).url,
+    ).toBe(
+      'https://gitlab.com/api/v4/projects?search=rust%20wasm&per_page=5&simple=true&order_by=name&sort=asc',
+    )
+    for (const query of [[['q', '']], [['q', '<script>']], [['q', 'rust'], ['sort', 'random']], [['q', 'rust'], ['order_by', 'size']]]) {
+      await expect(rt.buildPlan(env, { op: 'search', id: '', query: query as [string, string][] })).rejects.toThrow(/invalid/)
+    }
+    // 项目走 query 参数，ref 只在给了才带
+    expect((await rt.buildPlan(env, { op: 'commits', id: '', query: [['project', 'rust-lang/rust']] })).url).toBe(
+      'https://gitlab.com/api/v4/projects/rust-lang%2Frust/repository/commits?per_page=20',
+    )
+    expect(
+      (await rt.buildPlan(env, { op: 'commits', id: '', query: [['project', 'rust-lang/rust'], ['ref', 'main'], ['limit', '3']] })).url,
+    ).toBe(
+      'https://gitlab.com/api/v4/projects/rust-lang%2Frust/repository/commits?per_page=3&ref_name=main',
+    )
+    await expect(
+      rt.buildPlan(env, { op: 'commits', id: '', query: [['project', 'rust-lang/rust'], ['ref', 'a..b']] }),
+    ).rejects.toThrow(/invalid ref/)
+  })
+
+  it('crates：transform 把 versions 折叠掉重型字段', async () => {
+    const rt = runtimeFor('crates')!
+    const raw = JSON.stringify({
+      crate: { name: 'serde', max_version: '1.0.229', downloads: 100, description: 'x' },
+      versions: [
+        { num: '1.0.229', yanked: false, downloads: 900, license: 'MIT', features: { a: ['b'] }, links: { x: '/y' } },
+        { num: '1.0.228', yanked: true },
+      ],
+      keywords: ['serde'],
+    })
+    const out = JSON.parse(rt.transform!(raw, { op: 'crate', id: 'serde', query: [] }).text) as {
+      provider: string
+      versions: Record<string, unknown>[]
+      keywords: string[]
+    }
+    expect(out.provider).toBe('crates')
+    expect(out.keywords).toEqual(['serde'])
+    expect(out.versions).toEqual([
+      { num: '1.0.229', yanked: false, downloads: 900, license: 'MIT' },
+      { num: '1.0.228', yanked: true },
+    ])
+    // 上游不是 JSON 时不能把脏数据当正常响应缓存，要报上游错误
+    expect(() => rt.transform!('<html>502</html>', { op: 'crate', id: 'serde', query: [] })).toThrow(
+      /non-JSON/,
+    )
+  })
+
+  it('crates：crate 名与版本自己把关', async () => {
+    const rt = runtimeFor('crates')!
+    expect((await rt.buildPlan(env, { op: 'crate', id: 'serde', query: [] })).url).toBe(
+      'https://crates.io/api/v1/crates/serde',
+    )
+    expect((await rt.buildPlan(env, { op: 'version', id: 'serde/1.0.229', query: [] })).url).toBe(
+      'https://crates.io/api/v1/crates/serde/1.0.229',
+    )
+    for (const name of ['1serde', 'serde core', '', 'serde/../etc']) {
+      await expect(rt.buildPlan(env, { op: 'crate', id: name, query: [] })).rejects.toThrow(/invalid crate name/)
+    }
+    for (const version of ['1.0.229/extra', '../..', '1.0.229 bad']) {
+      await expect(rt.buildPlan(env, { op: 'version', id: `serde/${version}`, query: [] })).rejects.toThrow(
+        /invalid (target|version)/,
+      )
+    }
+    expect(
+      (await rt.buildPlan(env, { op: 'search', id: '', query: [['q', 'serde'], ['sort', 'downloads']] })).url,
+    ).toBe('https://crates.io/api/v1/crates?q=serde&per_page=10&sort=downloads')
+    await expect(
+      rt.buildPlan(env, { op: 'search', id: '', query: [['q', 'serde'], ['sort', 'popular']] }),
+    ).rejects.toThrow(/invalid sort/)
+  })
+
+  it('P6 三个源的额度与 host 都进了默认值', async () => {
+    expect((await readCredits(env, 'usgs', 'default')).limit).toBe(4000)
+    expect((await readCredits(env, 'gitlab', 'default')).limit).toBe(5000)
+    expect((await readCredits(env, 'crates', 'default')).limit).toBe(3000)
+    for (const host of ['earthquake.usgs.gov', 'gitlab.com', 'crates.io']) {
+      expect(ALLOWLIST).toContain(host)
+    }
+  })
 })
 
 describe('P3 付费通道（tier C）', () => {
@@ -899,7 +1038,7 @@ describe('P3 付费通道（tier C）', () => {
     expect(slug.in).toBe('path')
     expect(slug.multiSegment).toBe(true)
     // 目前只有"路径天然含 /"的端点才需要多段：economist 的 slug、crossref 的 DOI、
-    // npm 的 scoped 包名（@scope/pkg）
+    // npm 的 scoped 包名（@scope/pkg）、gitlab 的多层子组项目路径（group/sub/project）
     expect(
       allEndpoints()
         .flatMap(({ provider, endpoint: item }) =>
@@ -911,6 +1050,7 @@ describe('P3 付费通道（tier C）', () => {
     ).toEqual([
       'crossref.work.doi',
       'economist.article.slug',
+      'gitlab.project.id',
       'npm.latest.name',
       'npm.version.name',
     ])

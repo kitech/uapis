@@ -236,6 +236,69 @@ tier C 没有单一的 `auth.settingKey`，而是 `requiredAnyOf`：ZenRows / Ji
   配错当没配；它只发往 `eutils.ncbi.nlm.nih.gov`（白名单唯一出口），**不进缓存键**
 - 归属：题录（标题/作者/期刊）版权归作者与出版商，PubMed 只做索引
 
+## GitLab · tier A-
+
+上游：`https://gitlab.com/api/v4`，**公开项目零 key 可用**（只读，不碰私有项目）。
+
+| 方法 | 路径 | 参数 |
+| --- | --- | --- |
+| GET | `/api/v1/gitlab/projects` | `q`（必填，检索词）、`limit`(1-100, 默认 20)、`order_by`（last_activity_at/created_at/name/path/id）、`sort`（asc/desc） |
+| GET | `/api/v1/gitlab/project/{id}` | 路径 `id`：`namespace/project`（**子组可多层**）或数字项目 id |
+| GET | `/api/v1/gitlab/commits` | `project`（必填，`namespace/project` 或数字 id）、`ref`（分支/标签/sha，默认项目默认分支）、`limit`(1-100, 默认 20) |
+
+- 闸门 200ms。匿名配额实测是 `ratelimit-limit: 500`（每分钟每 IP），比多数零 key 源宽松，
+  但共享出口 IP 会一起被算，所以只放到 200ms
+- 多段路由：`/api/v1/gitlab/project/group/subgroup/project` 走 `multiSegment`，
+  上游要的是**单段 URL 编码**形式 `group%2Fsubgroup%2Fproject`，由 runtime 编码
+- 提交列表的 `project` 刻意放 query 而不是路径：否则 `project/{id}` 的贪婪多段
+  参数会和 `/commits` 后缀抢路由
+- 搜索固定带 `simple=true`：精简字段列表，2 个项目 2.8KB、20 个约 28KB
+- **不接任何需要 token 的端点**（私有项目、MR、issues 的写操作一概不碰）
+- 归属：项目元数据与代码版权归各项目作者/组织，GitLab 只做托管与索引
+
+## crates.io · tier A-
+
+上游：`https://crates.io/api/v1`，**零 key**（上游要求带可识别的 User-Agent，
+本项目发 `uapis/1.0 (+SITE_URL)`）。
+
+| 方法 | 路径 | 参数 |
+| --- | --- | --- |
+| GET | `/api/v1/crates/crate/{name}` | 路径 `name`：crate 名（字母开头） |
+| GET | `/api/v1/crates/crate/{name}/{version}` | 路径 `version`：如 `1.0.229` |
+| GET | `/api/v1/crates/search` | `q`（必填）、`limit`(1-100, 默认 10)、`sort`（relevance/downloads/recent-downloads/new/alpha/stars/recent-updates） |
+
+- 闸门 1000ms。官方未公布硬性限流但要求合理使用，共享资源别打太密
+- **`crate` 端点做 transform**：上游 `GET /crates/{name}` 里 **99% 的体积是 `versions`**
+  （serde 441KB / 316 个版本，每个版本还带 features、links、audit_actions、trustpub_data）。
+  实测 windows-sys 上游 506KB（**已经贴着本项目 512KB 上限**），
+  折叠成 `{num, yanked, created_at, downloads, license, rust_version, checksum, crate_size}`
+  之后：windows-sys 506KB → 6.5KB、serde 441KB → 77KB、rand 139KB → 24KB。
+  `crate` 对象本身整体保留（只有约 4KB）
+- 单版本（1.7KB）和搜索（2.1KB）天然小，passthrough
+- 归属：crate 元数据与代码版权归各发布者，crates.io 只做索引与托管
+
+## USGS 地震目录（FDSN event）· tier A
+
+上游：`https://earthquake.usgs.gov/fdsnws/event/1/query`，**零 key、公有领域**。
+
+| 方法 | 路径 | 参数 |
+| --- | --- | --- |
+| GET | `/api/v1/usgs/earthquakes` | `minmagnitude`(0-10，可含小数, 默认 2.5)、`limit`(1-200, 默认 20)、`orderby`（time/magnitude） |
+| GET | `/api/v1/usgs/earthquakes/{id}` | 路径 `id`：事件 id，如 `ci41339847` |
+
+- 闸门 1000ms。官方未公布硬性限流，本项目按"共享公共服务"自我约束
+- **只走 `/query`，不走 `feed/v1.0/summary/*.geojson`**：固定 feed 体积跨度太大
+  （all_hour 4.6KB、all_day 134KB、2.5_week 234KB、all_month **7.5MB**），
+  而且实测拼错的路径（如 `summary/all_min.geojson`）上游会**回 200 + `404 File Not Found` 纯文本**。
+  `/query` 反而可控：limit=20 → 14KB、limit=200 → 145KB，所以 `limit` 硬卡 200
+- 超时放宽到 8s 并**关掉重试**：实测 limit=200 要 4.8s，3s 默认超时不够；
+  慢上游重试只会把内联请求拖成 2× 超时
+- `minmagnitude` 是小数，而框架只对 `integer` 类型做范围校验，
+  所以格式和 0-10 区间都在 runtime 里兜住
+- 事件 id 白名单 `^[a-z0-9]{5,20}$`：形态合法但不存在的 id 由上游回 404，
+  那是诚实的答案，不在我们这层猜成 400
+- 数据属美国联邦政府**公有领域**；请注明 USGS / NEIC
+
 ## The Economist · tier C（付费通道）
 
 | 方法 | 路径 | 参数 |

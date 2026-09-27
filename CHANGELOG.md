@@ -5,7 +5,7 @@
 ## [0.1.0] - 2026-09-27
 
 P0 骨架 + P1 端点完善 + P2 零 key 源批量接入 + P3 付费代理通道 + P4 再加三个零 key 源
-+ P5 包管理与文献检索三个零 key 源。
++ P5 包管理与文献检索三个零 key 源 + P6 开放数据与代码托管三个零 key 源。
 
 ### Added
 
@@ -82,7 +82,22 @@ P0 骨架 + P1 端点完善 + P2 零 key 源批量接入 + P3 付费代理通道
   - `pubmed`（tier A-）：`search`（esearch）、`summary`（esummary `version=2.0`），均透传；
     空 `term` 与非法 PMID 上游都返回 **200 + 错误体**，一律在回源前 400；
     可选 `ncbi.api_key`（3 → 10 次/秒，填错当没配，不进缓存键）；不做 efetch XML
-- 离线测试：`vitest-pool-workers` + `@msw/cloudflare` 出站拦截，173 个用例全离线
+- P6 新增 provider（全部零 key，接入前逐个 curl 实测过可达性、体积与错误形态）：
+  - `usgs`（tier A，公有领域）：`earthquakes`（FDSN `/query`）、`earthquakes/{id}`，均透传 GeoJSON；
+    **不用 `feed/v1.0/summary/*.geojson`**（all_hour 4.6KB → all_month 7.5MB，
+    且拼错路径上游回 200 + `404 File Not Found` 纯文本），`/query` 反而可控（limit=200 → 145KB）；
+    `limit` 硬卡 200；超时放宽到 8s 并关掉重试（实测 limit=200 需 4.8s）；
+    `minmagnitude` 是小数而框架只校验 `integer`，格式与 0-10 区间在 runtime 兜住
+  - `gitlab`（tier A-）：`projects`（搜索）、`project/{id}`、`commits`，均透传；
+    只接只读公开端点；`project/{id}` 走 `multiSegment`（子组可多层），
+    runtime 编成上游要的单段 `group%2Fsub%2Fproject`；`commits` 的 `project` 放 query
+    避免与贪婪多段参数抢路由；匿名配额实测 500 次/分钟/IP
+  - `crates`（tier A-）：`crate/{name}`（**transform**）、`crate/{name}/{version}`、`search`；
+    上游要求可识别 UA（项目本就发 `uapis/1.0 (+SITE_URL)`）；
+    `crate` 折叠 `versions` 的原因同 PyPI：**99% 体积在 `versions`**
+    （serde 441KB / 316 版，windows-sys 上游 506KB 已贴着 512KB 上限），
+    折叠后 windows-sys 506KB → 6.5KB、serde 441KB → 77KB、rand 139KB → 24KB
+- 离线测试：`vitest-pool-workers` + `@msw/cloudflare` 出站拦截，193 个用例全离线
 - VitePress 文档站（首页/快速上手/数据源/限流/错误/合规 + 参考页），部署到同一 Worker 的 `/docs`
 
 ### Fixed
