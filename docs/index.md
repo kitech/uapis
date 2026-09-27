@@ -36,6 +36,9 @@ hero:
 | --- | --- | --- |
 | hackernews | `search`、`item/{id}`、`user/{id}`、`front`、`latest`、`user/{id}/posts` | 无 |
 | stackexchange | `question/{id}`、`search`、`user/{id}`、`tags`、`question/{id}/answers`、`question/{id}/comments`、`sites` | `se.key`（`sites` 除外） |
+| github | `repo/{owner}/{repo}`、`search/repositories`、`user/{login}` | 无（`gh.token` 可选） |
+| devto | `articles`、`article/{id}`、`user/{username}` | 无 |
+| arxiv | `search`、`paper/{id}` | 无 |
 
 完整参数见 [数据源与凭据](/guide/providers) 或 `/openapi.json`。
 

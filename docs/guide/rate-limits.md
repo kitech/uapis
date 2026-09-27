@@ -73,8 +73,12 @@ provider 闸门冷却时是 `503 RATE_LIMITED`，`details.retry_in` 告诉你等
 | item | 10min | 30天 |
 | profile | 5min | 7天 |
 | passthrough | 5min | 1天 |
+| archive | 15min | 1天 |
 | wall | 24h | 7天 |
 | error（负缓存） | 6h | 6h |
+
+`archive` 是给「上游明确要求长缓存」准备的档位：arXiv 官方要求结果至少缓存 15 分钟，
+所以它的两个端点都用这一档，而不是 60s 的 `search`。
 
 `GET /admin/cache/policies` 可以直接读这份表。
 

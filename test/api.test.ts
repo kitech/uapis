@@ -9,6 +9,26 @@ const env = cloudflareEnv as unknown as Env
 
 const HN = 'https://hn.algolia.com'
 const SE = 'https://api.stackexchange.com'
+const GH = 'https://api.github.com'
+const DEVTO = 'https://dev.to/api'
+const ARXIV = 'https://export.arxiv.org'
+
+const ARXIV_ATOM = `<?xml version='1.0' encoding='UTF-8'?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">
+  <updated>2026-09-24T18:00:00Z</updated>
+  <opensearch:totalResults>42</opensearch:totalResults>
+  <entry>
+    <id>http://arxiv.org/abs/2609.30258v1</id>
+    <title>Gradient &amp; inversion</title>
+    <summary>Private data leakage.</summary>
+    <published>2026-09-20T10:00:00Z</published>
+    <updated>2026-09-24T17:59:18Z</updated>
+    <author><name>Ada L.</name></author>
+    <link href="https://arxiv.org/abs/2609.30258v1" rel="alternate" type="text/html"/>
+    <arxiv:primary_category term="cs.LG" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="cs.LG" scheme="http://arxiv.org/schemas/atom"/>
+  </entry>
+</feed>`
 const ADMIN = { authorization: 'Bearer test-admin-token' }
 
 /** 主 Worker 与测试同 isolate，MSW 拦截对其出站请求生效 */
@@ -19,6 +39,9 @@ function call(path: string, init?: RequestInit): Promise<Response> {
 let hnSearch: { calls: number; urls: string[] }
 let seQuestions: { calls: number; urls: string[] }
 let seSites: { urls: string[] }
+let gh: { urls: string[]; auth: string[] }
+let devto: { urls: string[] }
+let arxiv: { urls: string[] }
 
 /** 每次测试都从这组默认 handler 开始，用例内的 network.use 不会污染后续用例 */
 function defaultHandlers(): ReturnType<typeof http.get>[] {
@@ -42,6 +65,30 @@ function defaultHandlers(): ReturnType<typeof http.get>[] {
       seQuestions.urls.push(request.url)
       return HttpResponse.json({ items: [{ question_id: 123, title: 'hello' }] })
     }),
+    http.get(`${GH}/repos/:owner/:repo`, ({ request, params }) => {
+      gh.urls.push(request.url)
+      return HttpResponse.json({ full_name: `${params.owner}/${params.repo}`, stargazers_count: 1 })
+    }),
+    http.get(`${GH}/users/:login`, ({ request }) => {
+      gh.urls.push(request.url)
+      return HttpResponse.json({ login: request.url.split('/').pop() })
+    }),
+    http.get(`${GH}/search/repositories`, ({ request }) => {
+      gh.urls.push(request.url)
+      return HttpResponse.json({ total_count: 1, items: [{ full_name: 'cloudflare/workers-sdk' }] })
+    }),
+    http.get(`${DEVTO}/articles/:id`, ({ request }) => {
+      devto.urls.push(request.url)
+      return HttpResponse.json({ id: 4754375, title: 'I Built an AI Coding Agent in Rust' })
+    }),
+    http.get(`${DEVTO}/users/by_username`, ({ request }) => {
+      devto.urls.push(request.url)
+      return HttpResponse.json({ type_of: 'user', username: 'ben' })
+    }),
+    http.get(`${ARXIV}/api/query`, ({ request }) => {
+      arxiv.urls.push(request.url)
+      return new HttpResponse(ARXIV_ATOM, { headers: { 'content-type': 'application/atom+xml' } })
+    }),
   ]
 }
 
@@ -50,6 +97,9 @@ beforeAll(async () => {
   hnSearch = { calls: 0, urls: [] }
   seQuestions = { calls: 0, urls: [] }
   seSites = { urls: [] }
+  gh = { urls: [], auth: [] }
+  devto = { urls: [] }
+  arxiv = { urls: [] }
   // 测试里不真实限速：把 provider 闸门间隔压到 0
   await putSettings(env, { 'gate.min_ms': '0' })
   clearSettingsMemo()
@@ -64,6 +114,10 @@ afterEach(() => {
   seQuestions.calls = 0
   seQuestions.urls = []
   seSites.urls = []
+  gh.urls = []
+  gh.auth = []
+  devto.urls = []
+  arxiv.urls = []
 })
 
 afterAll(() => {
@@ -103,11 +157,22 @@ describe('元数据端点', () => {
   it('/healthz 与 /status 可用', async () => {
     expect((await call('/healthz')).status).toBe(200)
     const body = (await (await call('/status')).json()) as {
-      providers: { name: string; status: string }[]
+      providers: { name: string; status: string; auth_required?: boolean; auth_optional?: boolean }[]
       free_tier_budget: Record<string, number>
     }
-    expect(body.providers.map((p) => p.name).sort()).toEqual(['hackernews', 'stackexchange'])
+    expect(body.providers.map((p) => p.name).sort()).toEqual([
+      'arxiv',
+      'devto',
+      'github',
+      'hackernews',
+      'stackexchange',
+    ])
     expect(body.providers.find((p) => p.name === 'stackexchange')?.status).toBe('unconfigured')
+    // 端点级 optional：没配 key 也算 active
+    const github = body.providers.find((p) => p.name === 'github')
+    expect(github?.status).toBe('active')
+    expect(github?.auth_required).toBe(false)
+    expect(github?.auth_optional).toBe(true)
     expect(body.free_tier_budget.requests_per_day).toBe(100_000)
   })
 
@@ -311,6 +376,92 @@ describe('P1 端点', () => {
   it('pagesize 越界 400', async () => {
     const res = await call('/api/v1/hackernews/front?hitsPerPage=1000')
     expect(res.status).toBe(400)
+  })
+})
+
+describe('P2 零 key 源', () => {
+  it('github/repo 的两个路径参数都进上游 URL', async () => {
+    const res = await call('/api/v1/github/repo/cloudflare/workers-sdk')
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ full_name: 'cloudflare/workers-sdk', stargazers_count: 1 })
+    expect(gh.urls.at(-1)).toBe('https://api.github.com/repos/cloudflare/workers-sdk')
+  })
+
+  it('github 匿名可用：不配 gh.token 也 200', async () => {
+    const res = await call('/api/v1/github/search/repositories?q=workers&sort=stars')
+    expect(res.status).toBe(200)
+    expect(res.headers.get('x-cache')).toBe('REFRESH')
+    expect(gh.urls.at(-1)).toContain('sort=stars&order=desc')
+  })
+
+  it('github 搜索缺 q 直接 400，不回源', async () => {
+    const before = gh.urls.length
+    const res = await call('/api/v1/github/search/repositories')
+    expect(res.status).toBe(400)
+    expect(((await res.json()) as { code: string }).code).toBe('INVALID_PARAMETER')
+    expect(gh.urls.length).toBe(before)
+  })
+
+  it('devto 单篇文章透传', async () => {
+    const res = await call('/api/v1/devto/article/i-built-an-ai-coding-agent-in-rust')
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as { title: string }).title).toContain('Rust')
+    expect(devto.urls.at(-1)).toBe(
+      'https://dev.to/api/articles/i-built-an-ai-coding-agent-in-rust',
+    )
+  })
+
+  it('devto user 走 by_username', async () => {
+    const res = await call('/api/v1/devto/user/ben')
+    expect(res.status).toBe(200)
+    expect(devto.urls.at(-1)).toContain('/users/by_username?url=ben')
+  })
+
+  it('arxiv Atom 落库前就转成 JSON，缓存里存的也是 JSON', async () => {
+    const res = await call('/api/v1/arxiv/search?search_query=cat:cs.LG&max_results=5')
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toContain('application/json')
+    const body = (await res.json()) as {
+      provider: string
+      total: number
+      entries: { id: string; title: string; primary: string }[]
+    }
+    expect(body.provider).toBe('arxiv')
+    expect(body.total).toBe(42)
+    expect(body.entries[0]?.id).toBe('2609.30258v1')
+    expect(body.entries[0]?.title).toBe('Gradient & inversion')
+    expect(body.entries[0]?.primary).toBe('cs.LG')
+
+    // 二次请求命中缓存，body 仍是 JSON（说明 transform 在 store 之前发生）
+    const second = await call('/api/v1/arxiv/search?search_query=cat:cs.LG&max_results=5')
+    expect(['HIT', 'HIT-T1']).toContain(second.headers.get('x-cache'))
+    expect(second.headers.get('content-type')).toContain('application/json')
+  })
+
+  it('arxiv 缺 search_query 400，非法查询式也 400', async () => {
+    expect((await call('/api/v1/arxiv/search')).status).toBe(400)
+    expect((await call('/api/v1/arxiv/search?search_query=all:x&evil=1')).status).toBe(400)
+  })
+
+  it('arxiv archive 档新鲜期 15 分钟，负缓存之外不回源', async () => {
+    const first = await call('/api/v1/arxiv/paper/2609.30258')
+    expect(first.status).toBe(200)
+    expect(arxiv.urls.at(-1)).toBe('https://export.arxiv.org/api/query?id_list=2609.30258')
+    const second = await call('/api/v1/arxiv/paper/2609.30258')
+    expect(['HIT', 'HIT-T1']).toContain(second.headers.get('x-cache'))
+  })
+
+  it('openapi.json 覆盖 5 个 provider', async () => {
+    const res = await call('/openapi.json')
+    const doc = (await res.json()) as {
+      paths: Record<string, Record<string, { 'x-provider'?: { endpoint_auth?: string } }>>
+    }
+    const paths = Object.keys(doc.paths)
+    expect(paths).toContain('/api/v1/github/repo/{owner}/{repo}')
+    expect(paths).toContain('/api/v1/arxiv/search')
+    expect(paths).toContain('/api/v1/devto/articles')
+    expect(doc.paths['/api/v1/stackexchange/sites']?.get?.['x-provider']?.endpoint_auth).toBe('optional')
+    expect(doc.paths['/api/v1/github/repo/{owner}/{repo}']?.get?.['x-provider']?.endpoint_auth).toBe('optional')
   })
 })
 

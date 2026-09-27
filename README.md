@@ -18,7 +18,7 @@
   Queues 1 万 operations/天、Workers Logs 20 万 events/天。设计目标见
   [docs/reference/design-decisions.md](docs/reference/design-decisions.md)
 - 固定上游 host 白名单 + 不可覆盖的诚实 UA，**不是**开放代理
-- 已接入 13 个端点：Hacker News 6 个（零 key）、Stack Exchange 7 个（除 `sites` 外需 `se.key`）
+- 已接入 21 个端点 / 5 个数据源：Stack Exchange 7、Hacker News 6、GitHub 3、DEV.to 3、arXiv 2
 
 ## 本地开发
 
@@ -34,7 +34,7 @@ npm run dev                         # wrangler dev
 
 ```bash
 npm run typecheck
-npm test                            # vitest-pool-workers + MSW 出站拦截，全离线（88 个用例）
+npm test                            # vitest-pool-workers + MSW 出站拦截，全离线（109 个用例）
 npm run deploy:dry                  # 构建文档并 dry-run，产物需 < 64MiB
 ```
 
@@ -60,6 +60,9 @@ npm run deploy:dry                  # 构建文档并 dry-run，产物需 < 64Mi
    （`SITE_URL` 决定 UA 尾串与 CORS 白名单，必须与真实域名一致）。
 5. 自定义域名生效后执行 T1 冒烟：`curl -i https://<域名>/api/v1/hackernews/search?q=cloudflare`
    连打两次，第二次必须带 `X-Cache: HIT`。
+6. arXiv 的首次真实回源建议单独验一次（它有 3 秒闸门与 15 分钟缓存）：
+   `curl -i 'https://<域名>/api/v1/arxiv/search?search_query=cat:cs.LG&max_results=3'`，
+   响应体应是本项目的 JSON（`provider: "arxiv"`），不是 Atom XML。
 
 ## 文档
 
@@ -77,7 +80,7 @@ npm run deploy:dry                  # 构建文档并 dry-run，产物需 < 64Mi
 
 ## 路线
 
-P0 骨架（已完成）→ P1 Stack Exchange/HN 完善与分页（已完成）→ P2 零 key 源批量接入 →
+P0 骨架（已完成）→ P1 Stack Exchange/HN 完善与分页（已完成）→ P2 零 key 源批量接入（已完成：GitHub / DEV.to / arXiv）→
 P3 付费墙源（ZenRows + Jina 双通道）→ P4 管理与可观测 → P5 打磨发布。
 
 ## License

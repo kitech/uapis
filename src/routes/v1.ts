@@ -28,11 +28,17 @@ async function handle(
     throw fail(ErrorCode.NotFound, `unknown provider: ${providerName}`, 404)
   }
 
-  const pathParam = endpoint.params.find((param) => param.in === 'path')
-  const rawId = pathParam === undefined ? '' : (c.req.param(pathParam.name) ?? '')
-  if (pathParam !== undefined && rawId.length === 0) {
-    throw fail(ErrorCode.InvalidParameter, `missing path parameter: ${pathParam.name}`, 400)
+  // 多个路径参数按声明顺序用 `/` 连接（GitHub 的 owner/repo），单参数时行为不变
+  const pathParams = endpoint.params.filter((param) => param.in === 'path')
+  const segments: string[] = []
+  for (const param of pathParams) {
+    const value = c.req.param(param.name) ?? ''
+    if (value.length === 0) {
+      throw fail(ErrorCode.InvalidParameter, `missing path parameter: ${param.name}`, 400)
+    }
+    segments.push(value)
   }
+  const rawId = segments.join('/')
 
   const target: Target = { op: endpoint.op, id: rawId, query: collectQuery(endpoint, c) }
   return serveResource(c, provider, endpoint, target, { inline: true })
@@ -58,6 +64,11 @@ function collectQuery(endpoint: EndpointDef, c: Context<AppEnv>): [string, strin
   }
 
   for (const [name, param] of declared) {
+    if (param.required && !pairs.some(([key]) => key === name)) {
+      throw fail(ErrorCode.InvalidParameter, `missing required parameter: ${name}`, 400, {
+        parameter: name,
+      })
+    }
     if (param.default === undefined) continue
     if (pairs.some(([key]) => key === name)) continue
     pairs.push([name, param.default])

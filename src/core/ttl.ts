@@ -5,6 +5,7 @@ export type Resource =
   | 'item'
   | 'profile'
   | 'passthrough'
+  | 'archive'
   | 'wall'
   | 'error'
 
@@ -19,6 +20,8 @@ export const TTL_POLICIES: Readonly<Record<Resource, TtlPolicy>> = Object.freeze
   item: { ttlSeconds: 600, staleSeconds: 2_592_000 },
   profile: { ttlSeconds: 300, staleSeconds: 604_800 },
   passthrough: { ttlSeconds: 300, staleSeconds: 86_400 },
+  // 上游明确要求长缓存的源（arXiv 官方要求结果至少缓存 15 分钟）
+  archive: { ttlSeconds: 900, staleSeconds: 86_400 },
   wall: { ttlSeconds: 86_400, staleSeconds: 604_800 },
   error: { ttlSeconds: 21_600, staleSeconds: 21_600 },
 })

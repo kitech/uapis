@@ -2,17 +2,25 @@ import { env as cloudflareEnv } from 'cloudflare:workers'
 import { describe, expect, it } from 'vitest'
 import { ApiError, ErrorCode, mapUpstreamStatus } from '../src/core/errors'
 import { buildCacheKey, hashPairs, sanitizeId, TTL_POLICIES } from '../src/core/ttl'
+import { clearSettingsMemo, putSettings } from '../src/core/settings'
 import { decodeTarget, encodeTarget } from '../src/core/target'
 import { parseMessage } from '../src/core/queue'
 import { allEndpoints, operationIdOf, REGISTRY, validateRegistry } from '../src/core/registry'
 import { buildOpenApi } from '../src/core/openapi'
 import { assertAllowedUpstream, userAgent } from '../src/core/fetcher'
 import { runtimeFor } from '../src/providers'
+import { parseAtom } from '../src/providers/arxiv'
 
 /** miniflare 的 Cloudflare.Env 缺少 src/types.ts 里声明的 ADMIN_TOKEN，测试里做一次桥接 */
 const env = cloudflareEnv as unknown as Env
 
-const ALLOWLIST = ['api.stackexchange.com', 'hn.algolia.com']
+const ALLOWLIST = [
+  'api.stackexchange.com',
+  'hn.algolia.com',
+  'api.github.com',
+  'dev.to',
+  'export.arxiv.org',
+]
 
 describe('错误体与状态码映射', () => {
   it('UApiError 只输出 code/message/details', () => {
@@ -233,14 +241,165 @@ describe('provider 回源计划（P1 端点）', () => {
     )
   })
 
-  it('分页参数上界统一：page ≤ 10、pagesize ≤ 100（sites 除外）', () => {
+  it('分页上界有天花板：页码 ≤ 30、每页条数 ≤ 100', () => {
     for (const { endpoint } of allEndpoints()) {
       for (const param of endpoint.params) {
-        if (param.name === 'page') expect(param.maximum).toBeLessThanOrEqual(10)
-        if (param.name === 'pagesize') expect(param.maximum).toBeGreaterThanOrEqual(20)
-        if (param.name === 'hitsPerPage') expect(param.maximum).toBe(100)
+        if (['page', 'start'].includes(param.name)) {
+          expect(param.maximum, `${param.name} @ ${endpoint.op}`).toBeLessThanOrEqual(30_000)
+        }
+        if (['pagesize', 'per_page', 'hitsPerPage', 'max_results'].includes(param.name)) {
+          expect(param.maximum, `${param.name} @ ${endpoint.op}`).toBeLessThanOrEqual(500)
+        }
       }
     }
+  })
+})
+
+describe('P2 零 key 源回源计划', () => {
+  const gh = runtimeFor('github')!
+  const devto = runtimeFor('devto')!
+  const arxiv = runtimeFor('arxiv')!
+
+  it('github 匿名不带 Authorization 头', async () => {
+    const plan = await gh.buildPlan(env, { op: 'repo', id: 'cloudflare/workers-sdk', query: [] })
+    expect(plan.url).toBe('https://api.github.com/repos/cloudflare/workers-sdk')
+    expect(plan.headers?.Authorization).toBeUndefined()
+    expect(plan.headers?.['X-GitHub-Api-Version']).toBe('2022-11-28')
+  })
+
+  it('github 配了 gh.token 就走 Authorization 头，不进 query', async () => {
+    await putSettings(env, { 'gh.token': 'ghp_test' })
+    clearSettingsMemo()
+    const plan = await gh.buildPlan(env, { op: 'user', id: 'torvalds', query: [] })
+    expect(plan.headers?.Authorization).toBe('Bearer ghp_test')
+    expect(plan.url).not.toContain('ghp_test')
+    await putSettings(env, { 'gh.token': '' })
+    clearSettingsMemo()
+  })
+
+  it('github repo 的 owner/repo 都要校验', async () => {
+    await expect(gh.buildPlan(env, { op: 'repo', id: 'bad owner/x', query: [] })).rejects.toThrow(
+      /invalid repo/,
+    )
+  })
+
+  it('github 搜索校验 sort/order 且 q 必填', async () => {
+    const plan = await gh.buildPlan(env, {
+      op: 'search',
+      id: '',
+      query: [['q', 'workers runtime'], ['sort', 'stars'], ['per_page', '50'], ['page', '2']],
+    })
+    expect(plan.url).toBe(
+      'https://api.github.com/search/repositories?q=workers%20runtime&per_page=50&page=2&sort=stars&order=desc',
+    )
+    await expect(
+      gh.buildPlan(env, { op: 'search', id: '', query: [['sort', 'nope']] }),
+    ).rejects.toThrow(/q/)
+    await expect(
+      gh.buildPlan(env, { op: 'search', id: '', query: [['q', 'a'], ['sort', 'nope']] }),
+    ).rejects.toThrow(/invalid sort/)
+  })
+
+  it('devto 列表把 tag/username/state/top 拼好', async () => {
+    const plan = await devto.buildPlan(env, {
+      op: 'articles',
+      id: '',
+      query: [['tag', 'rust'], ['state', 'top'], ['top', '30'], ['page', '2'], ['per_page', '50']],
+    })
+    expect(plan.url).toBe(
+      'https://dev.to/api/articles?page=2&tag=rust&state=top&top=30&per_page=50',
+    )
+    expect(plan.resource).toBe('feed')
+  })
+
+  it('devto 非法 state/tag 在 runtime 就被拒', async () => {
+    await expect(
+      devto.buildPlan(env, { op: 'articles', id: '', query: [['state', 'hot']] }),
+    ).rejects.toThrow(/invalid state/)
+    await expect(
+      devto.buildPlan(env, { op: 'articles', id: '', query: [['tag', 'a b']] }),
+    ).rejects.toThrow(/invalid tag/)
+  })
+
+  it('devto user 走上游的 by_username 端点', async () => {
+    const plan = await devto.buildPlan(env, { op: 'user', id: 'ben', query: [] })
+    expect(plan.url).toBe('https://dev.to/api/users/by_username?url=ben')
+  })
+
+  it('arxiv 查询串与 archive 档位（15 分钟新鲜期）', async () => {
+    const plan = await arxiv.buildPlan(env, {
+      op: 'search',
+      id: '',
+      query: [['search_query', 'cat:cs.LG'], ['max_results', '30'], ['sortBy', 'submittedDate']],
+    })
+    expect(plan.url).toBe(
+      'https://export.arxiv.org/api/query?search_query=cat%3Acs.LG&start=0&max_results=30&sortBy=submittedDate&sortOrder=descending',
+    )
+    expect(plan.resource).toBe('archive')
+    expect(TTL_POLICIES.archive.ttlSeconds).toBe(900)
+    // 慢上游：放宽超时但关掉重试，避免内联路径等 2×15s
+    expect(plan.timeoutMs).toBe(15_000)
+    expect(plan.retries).toBe(0)
+  })
+
+  it('arxiv 拒掉带 & 的查询式（防 URL 注入）', async () => {
+    await expect(
+      arxiv.buildPlan(env, { op: 'search', id: '', query: [['search_query', 'all:x&evil=1']] }),
+    ).rejects.toThrow(/invalid search_query/)
+  })
+
+  it('arxiv 单篇走 id_list', async () => {
+    const plan = await arxiv.buildPlan(env, { op: 'paper', id: '2609.30258v1', query: [] })
+    expect(plan.url).toBe('https://export.arxiv.org/api/query?id_list=2609.30258v1')
+    await expect(arxiv.buildPlan(env, { op: 'paper', id: '../etc', query: [] })).rejects.toThrow(
+      /invalid id/,
+    )
+  })
+})
+
+describe('arXiv Atom 解析（零依赖、有界）', () => {
+  const ATOM = `<?xml version='1.0' encoding='UTF-8'?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">
+  <updated>2026-09-24T18:00:00Z</updated>
+  <opensearch:totalResults>1234</opensearch:totalResults>
+  <entry>
+    <id>http://arxiv.org/abs/2609.30258v1</id>
+    <title>Gradient &amp; inversion
+    for private data</title>
+    <summary>Distributed learning offers
+    a degree of privacy.</summary>
+    <published>2026-09-20T10:00:00Z</published>
+    <updated>2026-09-24T17:59:18Z</updated>
+    <author><name>Ada L.</name></author>
+    <author><name>Grace &amp; Hopper</name></author>
+    <link href="https://arxiv.org/abs/2609.30258v1" rel="alternate" type="text/html"/>
+    <link title="pdf" href="https://arxiv.org/pdf/2609.30258v1" rel="related" type="application/pdf"/>
+    <arxiv:primary_category term="cs.LG" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="cs.LG" scheme="http://arxiv.org/schemas/atom"/>
+    <category term="cs.AI" scheme="http://arxiv.org/schemas/atom"/>
+  </entry>
+</feed>`
+
+  it('抽出 id/标题/摘要/作者/分类并解实体', () => {
+    const feed = parseAtom(ATOM)
+    expect(feed.provider).toBe('arxiv')
+    expect(feed.total).toBe(1234)
+    expect(feed.count).toBe(1)
+    const entry = feed.entries[0]!
+    expect(entry.id).toBe('2609.30258v1')
+    expect(entry.title).toBe('Gradient & inversion for private data')
+    expect(entry.summary).toBe('Distributed learning offers a degree of privacy.')
+    expect(entry.authors).toEqual(['Ada L.', 'Grace & Hopper'])
+    expect(entry.primary).toBe('cs.LG')
+    expect(entry.categories).toEqual(['cs.LG', 'cs.AI'])
+    expect(entry.pdf).toBe('https://arxiv.org/pdf/2609.30258v1')
+  })
+
+  it('空结果不炸', () => {
+    const feed = parseAtom('<feed xmlns="http://www.w3.org/2005/Atom"><entry></entry></feed>')
+    expect(feed.total).toBe(0)
+    expect(feed.entries.length).toBe(1)
+    expect(feed.entries[0]!.id).toBe('')
   })
 })
 

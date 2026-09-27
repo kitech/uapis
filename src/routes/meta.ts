@@ -41,14 +41,14 @@ meta.get('/status', async (c) => {
 
   const providers = await Promise.all(
     REGISTRY.map(async (provider) => {
+      // 端点级 optional（如 GitHub 全家、SE /sites）意味着没配 key 也能用，
+      // 因此只有"全部端点都要凭据"的 provider 才算 unconfigured
+      const needsKey =
+        provider.auth !== undefined &&
+        provider.endpoints.some((endpoint) => endpoint.auth !== 'optional')
       const configured =
-        provider.auth === undefined
-          ? true
-          : (await getSetting(c.env, provider.auth.settingKey)).length > 0
-      const credits =
-        provider.auth === undefined
-          ? null
-          : await readCredits(c.env, provider.name, 'default')
+        !needsKey ? true : (await getSetting(c.env, provider.auth!.settingKey)).length > 0
+      const credits = needsKey ? await readCredits(c.env, provider.name, 'default') : null
       return {
         name: provider.name,
         display_name: provider.displayName,
@@ -60,6 +60,8 @@ meta.get('/status', async (c) => {
         tos: provider.tos ?? null,
         limits: provider.limits ?? null,
         auth: provider.auth === undefined ? null : provider.auth.settingKey,
+        auth_required: needsKey,
+        auth_optional: provider.auth !== undefined && !needsKey,
         credits:
           credits === null
             ? null

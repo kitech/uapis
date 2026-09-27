@@ -4,7 +4,7 @@
 
 ## [0.1.0] - 2026-09-27
 
-P0 骨架 + P1 端点完善。
+P0 骨架 + P1 端点完善 + P2 零 key 源批量接入。
 
 ### Added
 
@@ -24,8 +24,23 @@ P0 骨架 + P1 端点完善。
 - P1 端点：HN `front` / `latest` / `user/{id}/posts`（feed 档，2min 新鲜期），
   SE `question/{id}/answers` / `question/{id}/comments` / `sites`
 - 端点级凭据要求 `EndpointDef.auth`：`sites` 标为 `optional`，匿名可用且不注入 key
-- 统一分页约定：`page`（0 起，≤10）与 `pagesize`/`hitsPerPage`（默认 20，≤100）
-- 离线测试：`vitest-pool-workers` + `@msw/cloudflare` 出站拦截，88 个用例全离线
+- 统一分页约定：`page`（0 起，≤10）与 `pagesize`/`hitsPerPage`（默认 20，≤100）；
+  1 起计数的上游（devto、github search）保持上游习惯并在文档标注
+- P2 新增 provider（tier A-，共 9 个端点）：
+  - `github`：`repo/{owner}/{repo}`、`search/repositories`、`user/{login}`，
+    token 走 `Authorization` 头，闸门 6000ms（search 10 次/分钟）
+  - `devto`：`articles`、`article/{id}`、`user/{username}`，零 key
+  - `arxiv`：`search`、`paper/{id}`，闸门 3000ms，缓存用新增的 `archive` 档
+    （15min 新鲜期，满足 arXiv「结果至少缓存 15 分钟」的要求）
+- 基础设施：
+  - `ProviderRuntime.transform` 钩子 + `refreshTarget` 落库前转换，
+    arXiv 的 Atom XML 由此转成 JSON（缓存里存的也是 JSON），零新依赖
+  - 新增 `archive` 缓存档（900s/86400s）
+  - 路由支持多路径参数（`owner`/`repo` 用 `/` 连接进 target.id）
+  - query 参数支持 `required`，缺失直接 400
+  - `/status` 新增 `auth_required` / `auth_optional`，
+    端点级 optional 的 provider（如 github）不再误报 `unconfigured`
+- 离线测试：`vitest-pool-workers` + `@msw/cloudflare` 出站拦截，109 个用例全离线
 - VitePress 文档站（首页/快速上手/数据源/限流/错误/合规 + 参考页），部署到同一 Worker 的 `/docs`
 
 ### Fixed

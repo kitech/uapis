@@ -14,7 +14,8 @@ export const SETTINGS_DEFAULTS: Readonly<Record<string, string>> = Object.freeze
   'ratelimit.rpm': '60',
   'gate.min_ms': '',
   'cors.origins': '*',
-  'upstream.allowlist': 'api.stackexchange.com,hn.algolia.com',
+  'upstream.allowlist':
+    'api.stackexchange.com,hn.algolia.com,api.github.com,dev.to,export.arxiv.org',
   'queue.daily_limit': '3000',
   'queue.soft_limit': '2700',
   'warm.list': '',
@@ -26,6 +27,9 @@ export const SETTINGS_DEFAULTS: Readonly<Record<string, string>> = Object.freeze
   'proxy.logical_daily_keys': '50',
   'quota.stackexchange.default': '9500',
   'quota.hackernews.default': '10000',
+  'quota.github.default': '4500',
+  'quota.devto.default': '9000',
+  'quota.arxiv.default': '4000',
 })
 
 const MEMO_TTL_MS = 30_000

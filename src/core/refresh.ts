@@ -89,7 +89,13 @@ export async function refreshTarget(
   const response =
     plan.proxy !== undefined
       ? await fetchViaProxy(env, plan.proxy)
-      : await fetchUpstream(env, { url: plan.url, method: plan.method, headers: plan.headers })
+      : await fetchUpstream(env, {
+          url: plan.url,
+          method: plan.method,
+          headers: plan.headers,
+          timeoutMs: plan.timeoutMs,
+          retries: plan.retries,
+        })
 
   if (response.status < 200 || response.status >= 300) {
     const mapped = mapUpstreamStatus(response.status)
@@ -112,15 +118,24 @@ export async function refreshTarget(
     }
   }
 
+  // 非 passthrough 源：先转成 JSON 再落库，缓存里存的永远是本项目的输出形态
+  let text = response.raw
+  let contentType = response.contentType
+  if (endpoint.passthrough === false && runtime.transform !== undefined) {
+    const result = runtime.transform(text, target)
+    text = result.text
+    contentType = result.contentType
+  }
+
   const policy = policyFor(endpoint.resource)
   const now = Date.now()
-  const body = encodeText(response.raw)
+  const body = encodeText(text)
   const stored = await store(env, {
     key,
     body,
     encoding: 'identity',
     status: 200,
-    contentType: response.contentType,
+    contentType,
     provider: providerName,
     resource: endpoint.resource,
     fetchedAt: now,
@@ -139,7 +154,7 @@ export async function refreshTarget(
     })
   }
 
-  return { status: 200, text: response.raw, contentType: response.contentType, key, stored }
+  return { status: 200, text, contentType, key, stored }
 }
 
 /** `gate.min_ms` 可覆盖 registry 里的最小间隔（测试与运维调优用；空值 = 用 registry 值） */

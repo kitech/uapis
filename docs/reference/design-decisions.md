@@ -1,6 +1,7 @@
 # 设计决策
 
 记录 v1→v6 演进过程中定下来的取舍，以及为什么。
+P2 之后新增的两条（transform 钩子、archive 档）单列在文末。
 
 ## v1：单 Worker，禁止绑定膨胀
 
@@ -59,6 +60,30 @@ Durable Objects（免费额度限制严格）、Service Bindings、Vectorize、C
 - `/admin/rebuild`、`/admin/kill`、`/admin/maintenance`、`/admin/prune` 让线上出问题能立刻处置，
   而不是改代码重新部署。
 - 管理接口用 Bearer secret、常量时间比较，读取设置时凭据脱敏。
+
+## transform 钩子：非透传源的出口（P2）
+
+**决策**：`ProviderRuntime.transform(raw, target)` 可选实现，只对 `passthrough: false`
+的端点调用，且在**落库之前**执行。
+
+**理由**：v4 的零解析是默认，不是教条。arXiv 只给 Atom XML，调用方要 JSON。
+把转换点放在 `refreshTarget` 里、写库之前，缓存里存的就已经是本项目的输出形态——
+读路径（`pipeline.serveResource`）因此完全不需要知道转换这回事，
+T1/T2 命中都是零解析，和透传源走同一条路。
+
+**否决**：引入 XML 库（+30KB 且要处理实体/DTD 的攻击面）。
+只认 arXiv `api/query` 的固定结构，用有界正则抽字段，
+`costMs = 2` 写进 registry，`/status` 与 OpenAPI 都能看到。
+上游哪天改结构，这里才会失效——那时再换库不迟。
+
+## archive 档：上游要求长缓存时（P2）
+
+**决策**：新增 `archive` 资源档（新鲜期 900s、stale 1 天），只给上游明确要求长缓存的源。
+
+**理由**：TTL 表是"按语义选档"，但有些源的语义之外还有硬性要求。
+arXiv 官方要求调用方把结果缓存至少 15 分钟，这是 ToS 的一部分，
+不是我们能自行放宽的。给它单独一档而不是把 `search` 整体调慢，
+是为了不连累 HN/SE/GitHub 这些确实需要短缓存的端点。
 
 ## 负缓存：6 小时
 

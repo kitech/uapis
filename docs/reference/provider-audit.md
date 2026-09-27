@@ -50,13 +50,50 @@
 - 额度：`quota.stackexchange.default` = 9500（留 5% 余量）
 - 未配置 key 时返回 `503 PROVIDER_UNCONFIGURED`，`details.setting = "se.key"`
 
+### github · tier A- ✅
+
+- 上游：`https://api.github.com`
+- 凭据：`gh.token` 可选（fine-grained PAT，<https://github.com/settings/personal-access-tokens>）；
+  匿名 core 60 次/小时、search 10 次/分钟，token 5000 次/小时
+- 端点全部标 `auth: 'optional'`，匿名可用；`/status` 报 `auth_required=false`
+- 闸门 6000ms：provider 级闸门取最严的约束（search 10 次/分钟）
+- token 走 `Authorization: Bearer` 头，不进 query（不进日志、不进缓存键）
+- 端点：`repo/{owner}/{repo}`（item 档）、`search/repositories`（search 档）、`user/{login}`（profile 档）
+- 只取元数据；raw/大文件域不进白名单
+- 额度：`quota.github.default` = 4500
+
+### devto · tier A- ✅
+
+- 上游：`https://dev.to/api`
+- 凭据：公开 API 零 key，约 1000 次/5 分钟（按 IP）
+- 端点：`articles`（feed 档）、`article/{id}`（item 档）、`user/{username}`（profile 档）
+- 全部透传；闸门 500ms；`state` 非法值在 runtime 400 并回 `details.allowed`
+- 归属：文章 CC BY-NC-SA 4.0
+- 额度：`quota.devto.default` = 9000
+
+### arxiv · tier A- ✅
+
+- 上游：`https://export.arxiv.org/api`
+- 凭据：零 key
+- **官方硬要求**：≤1 次/3 秒（闸门 3000ms）、结果至少缓存 15 分钟（`archive` 档）、
+  必须带可识别 UA（`fetcher` 强制注入带站点 URL 的 UA，调用方无法覆盖）
+- 唯一非透传源：`ProviderRuntime.transform` 把 Atom XML 转 JSON，零新依赖，
+  `parseCostMs = 2`；解析器只认 arXiv `api/query` 的固定结构
+- `search_query` 走字符白名单（拒 `&`/`%`），路径参数 `^\d{4}\.\d{4,5}(v\d{1,2})?$`
+- 端点：`search`、`paper/{id}`，都是 archive 档
+- 额度：`quota.arxiv.default` = 4000
+
 ## 计划中
 
 以下源已列入路线图，接入时逐条过上面的 checklist：
 
-- **零 key 官方源**（tier A-）：Reddit 官方 API、GitHub REST（可选 token）、
-  arXiv、PubMed、Open Library、Wikipedia/DuckDuckGo 摘要等
-- **需 key 源**（tier B）：Dev.to、ArXiv（可选）、F-Droid
+- **零 key 官方源**（tier A-）：Reddit 官方 API（现需 OAuth，匿名抓取违反条款，排到最后）、
+  PubMed E-utilities、Open Library、Wikipedia（MediaWiki Action/REST API）
+- **需 key 源**（tier B）：F-Droid、YouTube Data API、Phonark/Last.fm、Telegram Bot API
+
+> 说明：dev.to / GitHub / arXiv 已于 P2 接入（见上）。Wikipedia 与 Open Library
+> 在开发机上网络不通（连接超时），无法实测响应结构，因此没有凭印象写进来。
+> 接任何新源之前必须先 curl 一遍确认能通、能拿到预期结构。
 - **付费墙源**（tier C）：必须走 ZenRows / Jina 双通道，`proxy.mode` 控制，
   绝不提供免费绕过路径
 
