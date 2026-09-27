@@ -5,7 +5,7 @@
 ## [0.1.0] - 2026-09-27
 
 P0 骨架 + P1 端点完善 + P2 零 key 源批量接入 + P3 付费代理通道 + P4 再加三个零 key 源
-+ P5 包管理与文献检索三个零 key 源 + P6 开放数据与代码托管三个零 key 源。
++ P5 包管理与文献检索三个零 key 源 + P6 开放数据与代码托管三个零 key 源 + P7 音乐元数据零 key 源 + P8 天气与空气质量零 key 源。
 
 ### Added
 
@@ -97,7 +97,31 @@ P0 骨架 + P1 端点完善 + P2 零 key 源批量接入 + P3 付费代理通道
     `crate` 折叠 `versions` 的原因同 PyPI：**99% 体积在 `versions`**
     （serde 441KB / 316 版，windows-sys 上游 506KB 已贴着 512KB 上限），
     折叠后 windows-sys 506KB → 6.5KB、serde 441KB → 77KB、rand 139KB → 24KB
-- 离线测试：`vitest-pool-workers` + `@msw/cloudflare` 出站拦截，193 个用例全离线
+- P7 新增 provider（零 key，接入前逐个 curl 实测）：
+  - `musicbrainz`（tier A-）：`search`（artist/release-group/release，Lucene 语法透传）、
+    `artist/{mbid}`、`release-group/{mbid}`、`release/{mbid}`，均透传；
+    限流是官方写在响应头里的（search 400/分钟、实体 1900/分钟），闸门 1000ms；
+    **必须写死 `fmt=json`**（漏掉上游回 200 + XML）；搜索体积随查询宽度爆炸
+    （`radiohead`/25 → 15KB，`a`/10 → 146KB，`a`/100 → 296KB 且 22.8s），
+    所以 `limit` 硬卡 25、超时 6s、关闭重试；`inc` 只给单值枚举（逗号组合上游一律 400）；
+    MBID 只收规范小写（大写回 400，理由见 design-decisions）
+- P8 新增 provider（零 key，⚠️ 条款限非商业用途）：
+  - `openmeteo`（tier A-）：`current`、`hourly`、`geocode`、`air-quality`，全部透传；
+    实测体积最坏 20,595B（8 变量 × 16 天），离 512KB 上限差两个数量级，所以**不做 transform**
+    （与 PyPI/crates 的理由正好相反）；限流只存在于条款里、响应头一个都没有
+    （600/分钟、5,000/小时、10,000/天、300,000/月），绑定约束是每日 10,000 → 额度取 4000；
+    本地挡掉三个"200 但零数据"的坑（不给变量、geocoding 空名；geocoding 查无此城则照常透传）；
+    变量表本地校验，挡住上游把 Scala 内部类名漏进 reason 的行为；
+    空气质量实测 3.3s 超过默认超时 → 该端点放宽到 8s；全部端点 `retries: 0`（重试要花日预算）
+- 框架：补上 `type: 'number'` 的范围校验（`minimum`/`maximum` 曾经只对 `integer` 生效，
+  而 OpenAPI 无条件把范围写进 schema，文档与运行时不一致）；不收指数记法与前导 `+`
+- 修 `X-Cache-Age` 在 T1 命中时报 Unix epoch 的问题（`cache.ts` 里 T1 命中的 `fetchedAt`
+  写死为 0，Cache API 不返回写入时间所以此前无从取值）：写入时多存一个 `x-uapis-fat`，
+  部署前写入的老条目从 `cache-control: max-age` + `x-uapis-exp` 反推（误差在 TTL 取整内），
+  两者都取不到就宁可少报也不报假年龄
+- P7 收尾：musicbrainz 的 `release-group`/`release` 改用 `item` 缓存档（原来与 artist 共用 profile），
+  修正无效的 ToS URL
+- 离线测试：`vitest-pool-workers` + `@msw/cloudflare` 出站拦截，214 个用例全离线
 - VitePress 文档站（首页/快速上手/数据源/限流/错误/合规 + 参考页），部署到同一 Worker 的 `/docs`
 
 ### Fixed

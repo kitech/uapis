@@ -13,6 +13,7 @@ import {
   store,
   t1Delete,
   t1Put,
+  t1RequestUrl,
 } from '../src/core/cache'
 import { clearSettingsMemo, putSettings } from '../src/core/settings'
 
@@ -180,6 +181,50 @@ describe('T1（Cache API）缓存', () => {
     const found = await lookup(env, 'v1:hackernews:item:1:q')
     expect(found?.layer).toBe('T2')
     expect(found?.text).toBe('{"id":1}')
+  })
+
+  it('T1 命中带回真实抓取时刻（X-Cache-Age 原来报的是 Unix epoch）', async () => {
+    await putSettings(env, { 'cache.t1': 'on' })
+    clearSettingsMemo()
+    // 写一条 3 分钟前抓取、还剩 5 分钟过期的条目
+    const fetchedAt = Date.now() - 180_000
+    await t1Put(
+      env,
+      'v1:hackernews:item:7:q',
+      encodeText('{"id":7}'),
+      'application/json',
+      Date.now() + 300_000,
+      fetchedAt,
+    )
+    const found = await lookup(env, 'v1:hackernews:item:7:q')
+    expect(found?.layer).toBe('T1')
+    expect(found?.record.fetchedAt).toBe(fetchedAt)
+    // X-Cache-Age 应当是 180 秒左右，而不是 1.79e9
+    const age = Math.floor((Date.now() - (found?.record.fetchedAt ?? 0)) / 1000)
+    expect(age).toBeGreaterThanOrEqual(179)
+    expect(age).toBeLessThanOrEqual(181)
+  })
+
+  it('老条目（没有 x-uapis-fat）从 max-age + expires 反推出抓取时刻', async () => {
+    await putSettings(env, { 'cache.t1': 'on' })
+    clearSettingsMemo()
+    // 模拟部署前写入的条目：只有 cache-control 与 x-uapis-exp
+    const expiresAt = Date.now() + 300_000
+    const stored = new Response(encodeText('{"id":8}'), {
+      status: 200,
+      headers: {
+        'content-type': 'application/json',
+        'cache-control': 'public, max-age=300',
+        'x-uapis-exp': String(expiresAt),
+      },
+    })
+    await caches.default.put(new Request(t1RequestUrl('v1:hackernews:item:8:q')), stored)
+    const found = await lookup(env, 'v1:hackernews:item:8:q')
+    expect(found?.layer).toBe('T1')
+    // expires - max-age ≈ 写入时刻，误差在 TTL 取整之内（这里就是"刚刚"）
+    const age = Math.floor((Date.now() - (found?.record.fetchedAt ?? 0)) / 1000)
+    expect(age).toBeGreaterThanOrEqual(0)
+    expect(age).toBeLessThanOrEqual(2)
   })
 
   it('T1 命中不写 D1，避免吃掉每日写额度', async () => {

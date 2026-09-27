@@ -210,6 +210,47 @@
   额度 `quota.crates.default` = 3000
 - 归属：crate 元数据与代码版权归各发布者，crates.io 只做索引与托管
 
+### musicbrainz · tier A- ✅
+
+- 上游：`https://musicbrainz.org/ws/2`
+- 凭据：零 key，但要求带可识别的 User-Agent；
+  API 文档 <https://musicbrainz.org/doc/MusicBrainzAPI>、
+  条款 <https://musicbrainz.org/doc/MusicBrainzAPI/About/Terms%20of%20Use>
+- 端点：`search`（artist/release-group/release，search 档）、
+  `artist/{mbid}`（profile 档）、`release-group/{mbid}`、`release/{mbid}`（均透传 JSON）
+- 体积：实体端点都很小（artist 673B、artist+url-rels 21KB、release+recordings 1.7KB）；
+  搜索随查询宽度爆炸（radiohead/25 → 15KB，但 `a`/10 → **146KB**、100 → 296KB 且 22.8s），
+  所以 `limit` 硬卡 25、超时 6s、关闭重试
+- **必须写死 `fmt=json`**：漏掉时上游回 **200 + XML**（与 PubMed 的 `retmode` 同类坑）
+- `inc` 只给单值枚举：逗号组合（`genres,tags`）上游一律 400
+- 限流官方写在响应头：search `X-RateLimit-Limit: 400`/分钟、实体 1900/分钟；
+  闸门 1000ms；额度 `quota.musicbrainz.default` = 4000
+- 上游宽查询会间歇 503 "server busy"：走 5xx → `502 UPSTREAM_ERROR` 映射 + 负缓存，
+  刻意不占用本地闸门的 503 语义
+- 归属：音乐元数据版权归各权利人，MusicBrainz 只做开放元数据索引
+
+### openmeteo · tier A- ✅
+
+- 上游：`https://api.open-meteo.com/v1/forecast`、`https://geocoding-api.open-meteo.com/v1/search`、
+  `https://air-quality-api.open-meteo.com/v1/air-quality`
+- 凭据：零 key；文档 <https://open-meteo.com/en/docs>、条款 <https://open-meteo.com/en/terms>
+- 端点：`current`、`hourly`、`geocode`、`air-quality`，全部透传（`parseCostMs = 0`）
+- **体积完全不是问题，所以不做 transform**：current 327B、hourly 8 变量 × 16 天 20,595B、
+  空气质量 9 变量 × 7 天 10,863B。与 PyPI/crates 相反，那两个是因为响应有 500KB
+- **三个"200 但零数据"的坑全在本地挡**：不给变量（200 + 171B 只有元数据）、
+  geocoding 空名（200 + 无 `results` 键）；而 geocoding 查无此城形态相同但是**真·查不到**，照常透传
+- 变量表本地校验：上游拼错变量名时会把 Scala 内部类名
+  （`Cannot initialize SurfacePressureAndHeightVariable<...`）漏进 reason；
+  天气表与空气质量表完全不通用
+- 限流**只存在于条款里，响应头一个都没有**：600/分钟、5,000/小时、10,000/天、300,000/月；
+  绑定约束是每日 10,000，闸门 1000ms，额度 `quota.openmeteo.default` = 4000（他们日上限的 40%）
+- 空气质量实测最慢 3.3s，超过默认 3s 超时 → 该端点放宽到 8s；全部端点 `retries: 0`（重试要花日预算）
+- geocoding 写死 `format=json`（默认值本来就是 JSON，写死是防上游改默认值）
+- 归属：数据由 Open-Meteo.com 提供，CC BY 4.0
+- ⚠️ **条款限定非商业用途**：官方把"运营带订阅或广告的网站/应用"列为商业使用，
+  并保留不经通知封禁应用/IP 的权利。公开部署前需自行确认部署算非商业；
+  商业化要换 `customer-` 前缀 host + `apikey`，本项目**未**实现这条路
+
 ### economist · tier C ⚠️ 需自行确认条款
 
 - 目标 host：`www.economist.com`——**我们不直连**，只作为 `proxy.host` 的校验对象；
@@ -234,15 +275,19 @@
 
 - **零 key 官方源**（tier A-）：Reddit 官方 API（现需 OAuth，匿名抓取违反条款，排到最后）、
   Open Library、Wikipedia（MediaWiki Action/REST API）
+- 尚未接入的 Open-Meteo 子集（都可用，只是没做）：`daily` 变量表、历史/预报档案（`archive`）、
+  高程（`elevation`）、海洋预报（`marine`）、洪水（`flood`）
 - **需 key 源**（tier B）：F-Droid、YouTube Data API、Phonark/Last.fm、Telegram Bot API
 
 > 说明：dev.to / GitHub / arXiv 已于 P2 接入，lobsters / itunes / crossref 于 P4 接入，
-> PyPI / npm registry / PubMed 于 P5 接入，USGS / GitLab / crates.io 于 P6 接入（见上）。
+> PyPI / npm registry / PubMed 于 P5 接入，USGS / GitLab / crates.io 于 P6 接入，MusicBrainz 于 P7 接入，Open-Meteo 于 P8 接入（见上）。
 > P6 的探测结论（**都实测过，不是凭印象**）：
 > crates.io 之前记的"403 UA 拦截"是**探测姿势问题**——带上项目的诚实 UA 就能通；
 > 反而是被我们探测脚本漏掉的 `gitlab.com` 与 `earthquake.usgs.gov` 一直可用。
 > Wikipedia、Open Library、Docker Hub、F-Droid 仍然连接超时；
-> MusicBrainz 503（服务器忙）；NWS `api.weather.gov` 的 `/alerts/active` 无参调用
+> MusicBrainz 在 P7 探测时**从 503 变成可用**（上游"服务器忙"是间歇性的），
+> 再次印证"不通"只是当时的观测；Open-Meteo（天气/空气质量）零 key 可用但与本项目主题不合，
+> 且条款限非商业用途，故未接入；Last.fm 可达但缺 API key（tier B）；NWS `api.weather.gov` 的 `/alerts/active` 无参调用
 > **1MB 且 20s 超时**（`limit` 参数还报 400），体积不适合做缓存条目。
 > 接任何新源之前必须先 curl 一遍确认能通、能拿到预期结构，
 > 并按单响应 512KB 上限决定是透传还是 transform。

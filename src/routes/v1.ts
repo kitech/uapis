@@ -96,6 +96,7 @@ function validate(param: ParamDef, value: string): void {
       max_length: param.maxLength,
     })
   }
+  let parsed: number | undefined
   if (param.type === 'integer') {
     if (!/^\d+$/.test(value)) {
       throw fail(ErrorCode.InvalidParameter, `${param.name} must be an integer`, 400, {
@@ -103,7 +104,25 @@ function validate(param: ParamDef, value: string): void {
         value,
       })
     }
-    const parsed = Number.parseInt(value, 10)
+    parsed = Number.parseInt(value, 10)
+  }
+  if (param.type === 'number') {
+    // 刻意不收指数记法（1e3）与前导 +：坐标用不上，而同一数值出现两种写法
+    // 会让缓存键和错误文案分裂。判据同 UUID——机器不该生成的值就按窄格式收。
+    if (!/^-?(?:\d+|\d*\.\d+)$/.test(value)) {
+      throw fail(ErrorCode.InvalidParameter, `${param.name} must be a number`, 400, {
+        parameter: param.name,
+        value,
+      })
+    }
+    parsed = Number(value)
+  }
+  if (param.type === 'boolean' && !/^(true|false|0|1)$/.test(value)) {
+    throw fail(ErrorCode.InvalidParameter, `${param.name} must be boolean`, 400, {
+      parameter: param.name,
+    })
+  }
+  if (parsed !== undefined) {
     if (param.minimum !== undefined && parsed < param.minimum) {
       throw fail(ErrorCode.InvalidParameter, `${param.name} below minimum`, 400, {
         parameter: param.name,
@@ -116,11 +135,6 @@ function validate(param: ParamDef, value: string): void {
         maximum: param.maximum,
       })
     }
-  }
-  if (param.type === 'boolean' && !/^(true|false|0|1)$/.test(value)) {
-    throw fail(ErrorCode.InvalidParameter, `${param.name} must be boolean`, 400, {
-      parameter: param.name,
-    })
   }
 }
 

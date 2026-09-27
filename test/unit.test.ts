@@ -6,6 +6,7 @@ import { ApiError, ErrorCode, mapUpstreamStatus } from '../src/core/errors'
 import { buildCacheKey, hashPairs, sanitizeId, TTL_POLICIES } from '../src/core/ttl'
 import { clearSettingsMemo, putSettings, SETTINGS_DEFAULTS } from '../src/core/settings'
 import { decodeTarget, encodeTarget } from '../src/core/target'
+import type { Target } from '../src/core/target'
 import { parseMessage } from '../src/core/queue'
 import {
   allEndpoints,
@@ -43,6 +44,10 @@ const ALLOWLIST = [
   'earthquake.usgs.gov',
   'gitlab.com',
   'crates.io',
+  'musicbrainz.org',
+  'api.open-meteo.com',
+  'geocoding-api.open-meteo.com',
+  'air-quality-api.open-meteo.com',
 ]
 
 describe('错误体与状态码映射', () => {
@@ -954,6 +959,206 @@ describe('P5 包管理与文献检索源', () => {
     expect((await readCredits(env, 'gitlab', 'default')).limit).toBe(5000)
     expect((await readCredits(env, 'crates', 'default')).limit).toBe(3000)
     for (const host of ['earthquake.usgs.gov', 'gitlab.com', 'crates.io']) {
+      expect(ALLOWLIST).toContain(host)
+    }
+  })
+
+  it('musicbrainz：search 固定 fmt=json（漏了上游回 200+XML），limit 卡 25', async () => {
+    const rt = runtimeFor('musicbrainz')!
+    const plan = await rt.buildPlan(env, { op: 'search', id: '', query: [['q', 'radiohead'], ['type', 'artist'], ['limit', '5']] })
+    expect(plan.url).toBe('https://musicbrainz.org/ws/2/artist?query=radiohead&fmt=json&limit=5')
+    // 宽查询实测能到 16s，上游还会间歇 503：放宽超时但关掉重试
+    expect(plan.timeoutMs).toBe(6000)
+    expect(plan.retries).toBe(0)
+    expect((await rt.buildPlan(env, { op: 'search', id: '', query: [['q', 'a']] })).url).toBe(
+      'https://musicbrainz.org/ws/2/artist?query=a&fmt=json&limit=10',
+    )
+    expect((await rt.buildPlan(env, { op: 'search', id: '', query: [['q', 'a'], ['type', 'release-group']] })).url).toBe(
+      'https://musicbrainz.org/ws/2/release-group?query=a&fmt=json&limit=10',
+    )
+    // Lucene 语法透传（含中文/非 ASCII 检索词），但空值与控制字符自己拒
+    expect((await rt.buildPlan(env, { op: 'search', id: '', query: [['q', '邓丽君 AND type:person']] })).url).toContain(
+      'query=%E9%82%93%E4%B8%BD%E5%90%9B%20AND%20type%3Aperson',
+    )
+    for (const q of ['', 'a\nb', 'a\u0000b']) {
+      await expect(rt.buildPlan(env, { op: 'search', id: '', query: [['q', q]] })).rejects.toThrow(/invalid q/)
+    }
+    await expect(
+      rt.buildPlan(env, { op: 'search', id: '', query: [['q', 'a'], ['type', 'label']] }),
+    ).rejects.toMatchObject({ status: 400, details: { allowed: expect.arrayContaining(['artist']) } })
+  })
+
+  it('musicbrainz：MBID 只收规范小写（缓存键算在归一化之前），inc 只放行单值枚举', async () => {
+    const rt = runtimeFor('musicbrainz')!
+    const MBID = 'a74b1b7f-71a5-4011-9441-d0b5e4122711'
+    expect((await rt.buildPlan(env, { op: 'artist', id: MBID, query: [] })).url).toBe(
+      `https://musicbrainz.org/ws/2/artist/${MBID}?fmt=json`,
+    )
+    // 大写直接 400：缓存键是由原始路径 id 算的，放行大写等于同一实体两条缓存 + 两次回源
+    await expect(rt.buildPlan(env, { op: 'artist', id: MBID.toUpperCase(), query: [] })).rejects.toMatchObject({
+      status: 400,
+      details: { field: 'mbid' },
+    })
+    expect((await rt.buildPlan(env, { op: 'artist', id: MBID, query: [['inc', 'url-rels']] })).url).toBe(
+      `https://musicbrainz.org/ws/2/artist/${MBID}?fmt=json&inc=url-rels`,
+    )
+    expect((await rt.buildPlan(env, { op: 'release', id: MBID, query: [['inc', 'recordings']] })).url).toBe(
+      `https://musicbrainz.org/ws/2/release/${MBID}?fmt=json&inc=recordings`,
+    )
+    for (const id of ['not-a-uuid', 'A74B1B7F-71A5-4011-9441-D0B5E4122711', 'a74b1b7f-71a5-4011-9441-d0b5e412271', 'a74b1b7f71a540119441d0b5e4122711', '']) {
+      await expect(rt.buildPlan(env, { op: 'artist', id, query: [] })).rejects.toThrow(/invalid mbid/)
+    }
+    // 逗号组合上游一律 400（编码与否都试过），所以枚举只给单值
+    for (const inc of ['genres,tags', 'url-rels,aliases', 'bogus']) {
+      await expect(rt.buildPlan(env, { op: 'artist', id: MBID, query: [['inc', inc]] })).rejects.toThrow(/invalid inc/)
+    }
+    // inc 枚举是按端点给的：release 的合法值在 artist 上不合法
+    await expect(rt.buildPlan(env, { op: 'artist', id: MBID, query: [['inc', 'recordings']] })).rejects.toThrow(/invalid inc/)
+  })
+
+  it('P7 musicbrainz 的额度与 host 都进了默认值', async () => {
+    expect((await readCredits(env, 'musicbrainz', 'default')).limit).toBe(4000)
+    expect(ALLOWLIST).toContain('musicbrainz.org')
+  })
+})
+
+describe('P8 天气与空气质量（Open-Meteo）', () => {
+  const rt = runtimeFor('openmeteo')!
+
+  it('forecast：current 与 hourly 走 api. host，默认值补齐、单位枚举透传', async () => {
+    const current = await rt.buildPlan(env, {
+      op: 'current',
+      id: '',
+      query: [['latitude', '39.74'], ['longitude', '-97.09'], ['current', 'temperature_2m,weather_code']],
+    })
+    expect(current.url).toBe(
+      'https://api.open-meteo.com/v1/forecast?latitude=39.74&longitude=-97.09&current=temperature_2m,weather_code&timezone=auto&temperature_unit=celsius&wind_speed_unit=kmh&precipitation_unit=mm',
+    )
+    expect(current.resource).toBe('item')
+    expect(current.timeoutMs).toBe(5000)
+    expect(current.retries).toBe(0)
+
+    const hourly = await rt.buildPlan(env, {
+      op: 'hourly',
+      id: '',
+      query: [
+        ['latitude', '52.52'],
+        ['longitude', '13.41'],
+        ['hourly', 'temperature_2m,precipitation_probability'],
+        ['forecast_days', '16'],
+        ['temperature_unit', 'fahrenheit'],
+        ['wind_speed_unit', 'ms'],
+        ['timezone', 'Europe/Berlin'],
+      ],
+    })
+    expect(hourly.url).toContain('https://api.open-meteo.com/v1/forecast?')
+    expect(hourly.url).toContain('hourly=temperature_2m,precipitation_probability')
+    expect(hourly.url).toContain('forecast_days=16')
+    expect(hourly.url).toContain('temperature_unit=fahrenheit')
+    expect(hourly.url).toContain('wind_speed_unit=ms')
+    expect(hourly.url).toContain('timezone=Europe/Berlin')
+    // 逐小时预报用 feed 档（stale 7 天很适合预测数据），current 用 item 档
+    expect(hourly.resource).toBe('feed')
+  })
+
+  it('坐标不进 runtime：范围校验由框架的 validate() 兜住（见 api.test.ts）', async () => {
+    // openmeteo 的 buildPlan 完全不管坐标——所以 api 测试里 `latitude=999` → 400
+    // 只能来自框架那次修复（minimum/maximum 曾经只对 integer 生效）
+    const plan = await rt.buildPlan(env, {
+      op: 'current',
+      id: '',
+      query: [['latitude', '-90'], ['longitude', '180'], ['current', 'temperature_2m']],
+    })
+    expect(plan.url).toContain('latitude=-90')
+    expect(plan.url).toContain('longitude=180')
+  })
+
+  it('变量表本地校验：未知变量不把上游的 Scala 类名漏给调用方', async () => {
+    const base: Target = { op: 'current', id: '', query: [['latitude', '39.74'], ['longitude', '-97.09']] }
+    for (const bad of ['temperature_2m,,weather_code', 'temperature_2m,', 'temperature_2m,bogus_var']) {
+      await expect(
+        rt.buildPlan(env, { ...base, query: [...base.query, ['current', bad]] }),
+      ).rejects.toMatchObject({ status: 400, details: { allowed: expect.arrayContaining(['temperature_2m']) } })
+    }
+  })
+
+  it('单位与时区枚举自己拒，不指望上游的报错文案', async () => {
+    const base: Target = {
+      op: 'current',
+      id: '',
+      query: [
+        ['latitude', '39.74'],
+        ['longitude', '-97.09'],
+        ['current', 'temperature_2m'],
+      ],
+    }
+    for (const [field, value, allowed] of [
+      ['temperature_unit', 'kelvin', 'celsius'],
+      ['wind_speed_unit', 'knots', 'kmh'],
+      ['precipitation_unit', 'cm', 'mm'],
+      ['timezone', 'Mars Olympus', 'auto'],
+      ['timezone', 'GMT+8', 'UTC'],
+      ['timezone', '/Europe/Berlin', 'auto'],
+    ] as const) {
+      await expect(rt.buildPlan(env, { ...base, query: [...base.query, [field, value]] })).rejects.toMatchObject({
+        status: 400,
+        details: { allowed: expect.arrayContaining([allowed]) },
+      })
+    }
+  })
+
+  it('geocode：写死 format=json，空地名自己拒（上游对空名回 200 但没有 results）', async () => {
+    const plan = await rt.buildPlan(env, { op: 'geocode', id: '', query: [['name', 'Wichita']] })
+    expect(plan.url).toBe('https://geocoding-api.open-meteo.com/v1/search?name=Wichita&count=5&language=en&format=json')
+    expect(plan.resource).toBe('search')
+    const zh = await rt.buildPlan(env, {
+      op: 'geocode',
+      id: '',
+      query: [['name', '北京'], ['count', '3'], ['language', 'zh']],
+    })
+    expect(zh.url).toBe('https://geocoding-api.open-meteo.com/v1/search?name=%E5%8C%97%E4%BA%AC&count=3&language=zh&format=json')
+    for (const bad of ['', ' ', 'a\nb']) {
+      await expect(rt.buildPlan(env, { op: 'geocode', id: '', query: [['name', bad]] })).rejects.toThrow(/invalid name/)
+    }
+    await expect(rt.buildPlan(env, { op: 'geocode', id: '', query: [['name', 'x'], ['language', 'zh-CN']] })).rejects.toThrow(
+      /invalid language/,
+    )
+  })
+
+  it('air-quality：独立变量表、超时放宽到 8s，current 与 hourly 至少要有一个', async () => {
+    const both = await rt.buildPlan(env, {
+      op: 'air-quality',
+      id: '',
+      query: [
+        ['latitude', '39.74'],
+        ['longitude', '-97.09'],
+        ['current', 'pm2_5,us_aqi'],
+        ['hourly', 'european_aqi'],
+        ['forecast_days', '7'],
+      ],
+    })
+    expect(both.url).toBe(
+      'https://air-quality-api.open-meteo.com/v1/air-quality?latitude=39.74&longitude=-97.09&current=pm2_5,us_aqi&hourly=european_aqi&forecast_days=7&timezone=auto',
+    )
+    // 实测 3.3s，超过默认 3s：不放宽就会被自己的超时砍掉
+    expect(both.timeoutMs).toBe(8000)
+    // 一个变量都不给时上游回 200 但只有元数据
+    await expect(
+      rt.buildPlan(env, { op: 'air-quality', id: '', query: [['latitude', '39.74'], ['longitude', '-97.09']] }),
+    ).rejects.toThrow(/至少要有一个/)
+    // 天气变量混进空气质量表必然 400（两张表不通用）
+    await expect(
+      rt.buildPlan(env, {
+        op: 'air-quality',
+        id: '',
+        query: [['latitude', '39.74'], ['longitude', '-97.09'], ['current', 'temperature_2m']],
+      }),
+    ).rejects.toMatchObject({ status: 400, details: { allowed: expect.arrayContaining(['pm2_5']) } })
+  })
+
+  it('P8 openmeteo 的额度与三个 host 都进了默认值', async () => {
+    expect((await readCredits(env, 'openmeteo', 'default')).limit).toBe(4000)
+    for (const host of ['api.open-meteo.com', 'geocoding-api.open-meteo.com', 'air-quality-api.open-meteo.com']) {
       expect(ALLOWLIST).toContain(host)
     }
   })

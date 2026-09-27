@@ -47,7 +47,7 @@ function cacheApiAvailable(): boolean {
 export async function t1Get(
   env: Env,
   key: string,
-): Promise<{ body: Uint8Array; contentType: string; expiresAt: number } | null> {
+): Promise<{ body: Uint8Array; contentType: string; expiresAt: number; fetchedAt: number } | null> {
   if (!(await isT1Enabled(env)) || !cacheApiAvailable()) return null
   try {
     const hit = await caches.default.match(new Request(t1RequestUrl(key)))
@@ -59,10 +59,28 @@ export async function t1Get(
       body: new Uint8Array(buffer),
       contentType: hit.headers.get('content-type') ?? JSON_CT,
       expiresAt,
+      fetchedAt: readFetchedAt(hit.headers, expiresAt),
     }
   } catch {
     return null
   }
+}
+
+/**
+ * Cache API 不返回写入时间，只能自己存。
+ *
+ * `x-uapis-fat` 是新写入的抓取时刻；`cache-control: max-age` 则是写入时算出来的 TTL，
+ * 而 `x-uapis-exp = 抓取时刻 + TTL`，所以**老条目（部署前写入、没有 fat 头的）**
+ * 还能从这两者反推出来，误差在一个 TTL 取整之内。
+ *
+ * 反推不出来就返回 0：宁可让 `X-Cache-Age` 少报，也不要报一个假的年龄。
+ */
+function readFetchedAt(headers: Headers, expiresAt: number): number {
+  const explicit = Number.parseInt(headers.get('x-uapis-fat') ?? '', 10)
+  if (Number.isFinite(explicit) && explicit > 0) return explicit
+  const maxAge = Number.parseInt(/max-age=(\d+)/.exec(headers.get('cache-control') ?? '')?.[1] ?? '', 10)
+  if (Number.isFinite(maxAge) && maxAge > 0) return Math.max(0, expiresAt - maxAge * 1000)
+  return 0
 }
 
 export async function t1Put(
@@ -71,6 +89,7 @@ export async function t1Put(
   body: Uint8Array,
   contentType: string,
   expiresAt: number,
+  fetchedAt: number = Date.now(),
 ): Promise<void> {
   if (!(await isT1Enabled(env)) || !cacheApiAvailable()) return
   const ttl = Math.max(T1_MIN_TTL_SECONDS, Math.ceil((expiresAt - Date.now()) / 1000))
@@ -81,6 +100,7 @@ export async function t1Put(
         'content-type': contentType,
         'cache-control': `public, max-age=${ttl}`,
         'x-uapis-exp': String(expiresAt),
+        'x-uapis-fat': String(fetchedAt),
       },
     })
     await caches.default.put(new Request(t1RequestUrl(key)), stored)
@@ -110,7 +130,8 @@ export async function lookup(env: Env, key: string): Promise<CacheLookup | null>
       contentType: fast.contentType,
       provider: key.split(':')[1] ?? '',
       resource: key.split(':')[2] ?? '',
-      fetchedAt: 0,
+      // T1 命中：抓取时刻从响应头读回来（老条目走 max-age 反推）
+      fetchedAt: Math.min(fast.fetchedAt, Date.now()),
       expiresAt: fast.expiresAt,
       staleUntil: fast.expiresAt,
       size: fast.body.byteLength,
@@ -225,7 +246,7 @@ export async function store(env: Env, record: CacheRecord): Promise<boolean> {
 
   estimatedRows = (estimatedRows ?? 0) + 1
   if (record.status === 200) {
-    await t1Put(env, record.key, record.body, record.contentType, record.expiresAt)
+    await t1Put(env, record.key, record.body, record.contentType, record.expiresAt, record.fetchedAt)
   }
   return true
 }

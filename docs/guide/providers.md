@@ -299,6 +299,75 @@ tier C 没有单一的 `auth.settingKey`，而是 `requiredAnyOf`：ZenRows / Ji
   那是诚实的答案，不在我们这层猜成 400
 - 数据属美国联邦政府**公有领域**；请注明 USGS / NEIC
 
+## MusicBrainz · tier A-
+
+上游：`https://musicbrainz.org/ws/2`，**零 key**（上游要求带可识别的 User-Agent，
+本项目发 `uapis/1.0 (+SITE_URL)`）。
+
+| 方法 | 路径 | 参数 |
+| --- | --- | --- |
+| GET | `/api/v1/musicbrainz/search` | `q`（必填，**透传上游 Lucene 语法**）、`type`（artist/release-group/release，默认 artist）、`limit`(1-25, 默认 10) |
+| GET | `/api/v1/musicbrainz/artist/{mbid}` | 路径 `mbid`（36 位小写 UUID）；`inc`：url-rels/aliases/genres/tags（单值） |
+| GET | `/api/v1/musicbrainz/release-group/{mbid}` | 路径 `mbid`；`inc`：releases/artist-credits/url-rels（单值） |
+| GET | `/api/v1/musicbrainz/release/{mbid}` | 路径 `mbid`；`inc`：recordings/artist-credits/labels/media（单值） |
+
+- 闸门 1000ms。**限流是官方写在响应头里的**：search 类端点
+  `X-RateLimit-Limit: 400`/分钟，按 MBID 查实体是 `1900`/分钟，1000ms 对两者都在额度内
+- **必须写死 `fmt=json`**：漏掉 `fmt` 上游回 **200 + XML**（`<metadata xmlns=...>`）。
+  和 PubMed 的 `retmode=json` 同一个坑，只是这里回的是 XML 不是 JSON
+- **`limit` 硬卡 25**：搜索体积随查询宽度爆炸——`query=radiohead&limit=25` 只有 15KB，
+  但 `query=a&limit=10` 就是 **146KB**，limit=100 是 296KB 且**要 22.8s**。
+  超时放宽到 6s 并**关掉重试**，宽查询宁可 502 也不要把内联请求拖成 2× 超时
+- 上游在宽查询下会间歇回 **503 "The MusicBrainz web server is currently busy"**；
+  5xx 走正常映射变成 `502 UPSTREAM_ERROR` 并写负缓存——**不占用本地闸门的 503 语义**，
+  后者只留给"我们自己冷却中"
+- `inc` 只放行**单值**：实测 `inc=genres,tags`（逗号无论是否 URL 编码）上游都回 400，
+  所以不做逗号组合
+- **MBID 只收规范小写**，大写回 400。缓存键由原始路径 id 算出（在归一化之前），
+  放行大写等于同一实体两条缓存条目 + 两次一模一样的回源
+- `q` 透传 Lucene 语法（官方文档明确支持 `AND`/`OR`/`NOT`/字段前缀），
+  允许非 ASCII 检索词（实测"邓丽君"正常返回 642 个艺人），只挡控制字符和超长值
+- 归属：音乐元数据（艺人名、发行信息）版权归各权利人，MusicBrainz 只做开放元数据索引
+
+## Open-Meteo · tier A-
+
+上游：`https://api.open-meteo.com`（预报）、`https://geocoding-api.open-meteo.com`（地名检索）、
+`https://air-quality-api.open-meteo.com`（空气质量），**零 key**。
+
+> ⚠️ **条款限定非商业用途**（CC BY 4.0）。官方把"运营带订阅或广告的网站/应用"明确列为商业使用，
+> 并保留不经通知封禁应用/IP 的权利。公开部署前请自行确认你的部署算非商业；
+> 商业化需要换成 `customer-` 前缀的 host 并带 `apikey`（本项目**没有**实现这条路）。
+> 署名：数据由 Open-Meteo.com 提供，CC BY 4.0。
+
+| 方法 | 路径 | 参数 |
+| --- | --- | --- |
+| GET | `/api/v1/openmeteo/current` | `latitude`(-90~90)、`longitude`(-180~180) **必填**；`current`(变量表必填)；`timezone`(默认 auto)；3 个单位枚举 |
+| GET | `/api/v1/openmeteo/hourly` | 同上 + `hourly`(变量表必填) + `forecast_days`(1-16，默认 7) |
+| GET | `/api/v1/openmeteo/geocode` | `name` 必填；`count`(1-100，默认 5)；`language`(两位小写，默认 en) |
+| GET | `/api/v1/openmeteo/air-quality` | 坐标必填；`current`/`hourly`（空气质量变量表，**至少一个**）；`forecast_days`(1-7) |
+
+- 闸门 1000ms；每日额度 `quota.openmeteo.default` = 4000。**限流只存在于条款里，响应头一个都没有**：
+  600/分钟、5,000/小时、**10,000/天**、300,000/月——绑定约束是每日 10,000，而本项目的 quota 表本来就是按天计的
+- **纯透传，不做 transform**：实测 current 327B、hourly 8 变量 × 16 天 20,595B、
+  空气质量 9 变量 × 7 天 10,863B，离 512KB 上限差两个数量级。和 PyPI/crates 要 transform 的原因正好相反
+- **三个"看起来成功其实没数据"的坑，全在本地挡掉**：
+  1. 坐标合法但一个变量都不给 → 上游回 `200` + 171B，只有元数据没有数据
+  2. geocoding `name=` 传空 → 上游回 `200` + `{generationtime_ms}`，**没有 `results` 键**
+  3. geocoding 查无此城 → 形态相同，但这个是**真·查不到**，应当照常透传（所以只拒空名）
+- **变量表必须本地校验**：上游拼错变量名时会把 Scala 内部类名漏进 reason
+  （`Cannot initialize SurfacePressureAndHeightVariable<...`），透传等于把上游实现细节甩给调用方。
+  天气表（18/20 项）与空气质量表（11 项）**完全不通用**，混用必然 400
+- 变量数上界就是白名单长度，不另设 count 上限：384 个时间点 × 20 个变量实测在 50KB 量级
+- 空气质量实测最慢 3.3s，**超过默认 3s 超时**，所以该端点显式放宽到 8s；全部端点 `retries: 0`
+  （日预算只有 10,000，重试等于白花额度）
+- `timezone` 只收 `auto`/`UTC`/`GMT` 或 IANA 形态（`Region/City`）。**不**内联 600 项的完整时区表：
+  形态合法但不存在的时区会落到上游 400，最终表现为 `502`——这是已知取舍
+- geocoding 写死 `format=json`（默认值本来就是 JSON，写死是防上游改默认值打不到我们，
+  和 MusicBrainz 的 `fmt=json` 同一思路）
+- **明确不暴露**：`daily` 变量表、`past_days`/`start_date`/`end_date`/`forecast_hours`/`forecast_minutely_15`、
+  `models`（几十个模型名会把缓存键打爆）、`elevation`、`apikey`
+- 归属：气象与空气质量数据由 Open-Meteo.com 提供，CC BY 4.0
+
 ## The Economist · tier C（付费通道）
 
 | 方法 | 路径 | 参数 |

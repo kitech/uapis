@@ -29,6 +29,10 @@ const EUTILS = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils'
 const USGS = 'https://earthquake.usgs.gov'
 const GITLAB = 'https://gitlab.com'
 const CRATES = 'https://crates.io'
+const MB = 'https://musicbrainz.org'
+const OM = 'https://api.open-meteo.com'
+const OM_GEO = 'https://geocoding-api.open-meteo.com'
+const OM_AQ = 'https://air-quality-api.open-meteo.com'
 
 const ECONOMIST_HTML = `<html><head><title>Fallback</title>
   <meta property="og:title" content="Paywalled &amp; locked">
@@ -76,6 +80,10 @@ let eutils: { urls: string[] }
 let usgs: { urls: string[] }
 let gitlab: { urls: string[] }
 let crates: { urls: string[] }
+let mb: { urls: string[] }
+let om: { urls: string[] }
+let omGeo: { urls: string[] }
+let omAq: { urls: string[] }
 
 /** 每次测试都从这组默认 handler 开始，用例内的 network.use 不会污染后续用例 */
 function defaultHandlers(): ReturnType<typeof http.get>[] {
@@ -274,6 +282,53 @@ function defaultHandlers(): ReturnType<typeof http.get>[] {
       crates.urls.push(request.url)
       return HttpResponse.json({ version: { num: params.version, crate: params.name, downloads: 900, license: 'MIT OR Apache-2.0', features: { derive: ['serde_derive'] } } })
     }),
+    // MusicBrainz：检索端点与实体端点是不同 pathname，MSW 要分开注册
+    http.get(`${MB}/ws/2/artist`, ({ request }) => {
+      mb.urls.push(request.url)
+      return HttpResponse.json({ created: '2026-09-27T13:08:57.522Z', count: 29, offset: 0, artists: [{ id: 'a74b1b7f-71a5-4011-9441-d0b5e4122711', name: 'Radiohead', country: 'GB' }] })
+    }),
+    http.get(`${MB}/ws/2/artist/:mbid`, ({ request, params }) => {
+      mb.urls.push(request.url)
+      return HttpResponse.json({ id: params.mbid, name: 'Radiohead', country: 'GB', 'life-span': { begin: '1985' } })
+    }),
+    http.get(`${MB}/ws/2/release-group/:mbid`, ({ request, params }) => {
+      mb.urls.push(request.url)
+      return HttpResponse.json({ id: params.mbid, title: 'Album Box Set', 'primary-type': 'Album' })
+    }),
+    http.get(`${MB}/ws/2/release/:mbid`, ({ request, params }) => {
+      mb.urls.push(request.url)
+      return HttpResponse.json({ id: params.mbid, title: 'Kid A', date: '2000-11-02', status: 'Official' })
+    }),
+    // Open-Meteo：forecast 的 current 与 hourly 是同一个 pathname，靠 query 区分
+    http.get(`${OM}/v1/forecast`, ({ request }) => {
+      om.urls.push(request.url)
+      return HttpResponse.json({
+        latitude: 39.737442,
+        longitude: -97.08586,
+        utc_offset_seconds: -18000,
+        timezone: 'America/Chicago',
+        elevation: 434,
+        current_units: { time: 'iso8601', temperature_2m: '\u00b0C' },
+        current: { time: '2026-09-27T08:45', interval: 900, temperature_2m: 18.3 },
+        hourly_units: { time: 'iso8601', temperature_2m: '\u00b0C' },
+        hourly: { time: ['2026-09-27T00:00', '2026-09-27T01:00'], temperature_2m: [18.1, 17.9] },
+      })
+    }),
+    http.get(`${OM_GEO}/v1/search`, ({ request }) => {
+      omGeo.urls.push(request.url)
+      return HttpResponse.json({ generationtime_ms: 0.12, results: [{ id: 4281730, name: 'Wichita', latitude: 37.6872, longitude: -97.3301, country: 'US' }] })
+    }),
+    http.get(`${OM_AQ}/v1/air-quality`, ({ request }) => {
+      omAq.urls.push(request.url)
+      return HttpResponse.json({
+        latitude: 39.699997,
+        longitude: -97.1,
+        utc_offset_seconds: -18000,
+        timezone: 'America/Chicago',
+        current_units: { time: 'iso8601', pm2_5: '\u00b5g/m\u00b3', us_aqi: 'USAQI' },
+        current: { time: '2026-09-27T08:00', pm2_5: 4.1, us_aqi: 28 },
+      })
+    }),
     // DOI 天然多段，MSW 的 `:doi{.+}` 匹配不到多段路径，用正则整段匹配
     http.get(/api\.crossref\.org\/works\/.+/, ({ request }) => {
       crossref.urls.push(request.url)
@@ -302,6 +357,10 @@ beforeAll(async () => {
   usgs = { urls: [] }
   gitlab = { urls: [] }
   crates = { urls: [] }
+  mb = { urls: [] }
+  om = { urls: [] }
+  omGeo = { urls: [] }
+  omAq = { urls: [] }
   // 测试里不真实限速：把 provider 闸门间隔压到 0
   await putSettings(env, { 'gate.min_ms': '0' })
   clearSettingsMemo()
@@ -331,6 +390,7 @@ afterEach(() => {
   usgs.urls = []
   gitlab.urls = []
   crates.urls = []
+  mb.urls = []
 })
 
 // 限流是 isolate 内的固定窗口计数器，不清的话用例数一多就会互相踩出 429
@@ -389,7 +449,9 @@ describe('元数据端点', () => {
       'hackernews',
       'itunes',
       'lobsters',
+      'musicbrainz',
       'npm',
+      'openmeteo',
       'pypi',
       'pubmed',
       'stackexchange',
@@ -1274,11 +1336,11 @@ describe('P5 包管理与文献检索源', () => {
     expect(crates.urls.length).toBe(before)
   })
 
-  it('/status 里 usgs/gitlab/crates 都是零 key active', async () => {
+  it('/status 里 usgs/gitlab/crates/musicbrainz 都是零 key active', async () => {
     const body = (await (await call('/status')).json()) as {
       providers: { name: string; status: string; auth_optional?: boolean; auth_required?: boolean; credits?: { limit: number } | null }[]
     }
-    for (const name of ['usgs', 'gitlab', 'crates']) {
+    for (const name of ['usgs', 'gitlab', 'crates', 'musicbrainz']) {
       const entry = body.providers.find((p) => p.name === name)!
       expect(entry.status).toBe('active')
       expect(entry.auth_required).toBe(false)
@@ -1287,6 +1349,7 @@ describe('P5 包管理与文献检索源', () => {
     expect(body.providers.find((p) => p.name === 'usgs')?.credits?.limit).toBe(4000)
     expect(body.providers.find((p) => p.name === 'gitlab')?.credits?.limit).toBe(5000)
     expect(body.providers.find((p) => p.name === 'crates')?.credits?.limit).toBe(3000)
+    expect(body.providers.find((p) => p.name === 'musicbrainz')?.credits?.limit).toBe(4000)
   })
 
   it('openapi.json 与 llms.txt 覆盖 15 个 provider', async () => {
@@ -1307,6 +1370,237 @@ describe('P5 包管理与文献检索源', () => {
     expect(text).toContain('/api/v1/usgs/earthquakes')
     expect(text).toContain('/api/v1/gitlab/projects')
     expect(text).toContain('/api/v1/crates/search')
+  })
+
+  it('musicbrainz search：固定 fmt=json，Lucene 语法透传', async () => {
+    const res = await call('/api/v1/musicbrainz/search?q=radiohead&type=artist&limit=5')
+    expect(res.status).toBe(200)
+    const url = new URL(mb.urls.at(-1)!)
+    expect(url.pathname).toBe('/ws/2/artist')
+    expect(url.searchParams.get('query')).toBe('radiohead')
+    // 漏掉 fmt 上游会回 200 + XML，所以这个参数必须是写死的
+    expect(url.searchParams.get('fmt')).toBe('json')
+    expect(url.searchParams.get('limit')).toBe('5')
+    const body = (await res.json()) as { count: number; artists: { name: string }[] }
+    expect(body.count).toBe(29)
+    expect(body.artists[0]?.name).toBe('Radiohead')
+
+    const bad = await call('/api/v1/musicbrainz/search?q=%3Cscript%3E&evil=1')
+    expect(bad.status).toBe(400)
+    expect(((await bad.json()) as { code: string }).code).toBe('INVALID_PARAMETER')
+  })
+
+  it('musicbrainz 实体端点：MBID 校验、inc 单值枚举', async () => {
+    const MBID = 'a74b1b7f-71a5-4011-9441-d0b5e4122711'
+    const artist = await call(`/api/v1/musicbrainz/artist/${MBID}`)
+    expect(artist.status).toBe(200)
+    expect(mb.urls.at(-1)).toBe(`https://musicbrainz.org/ws/2/artist/${MBID}?fmt=json`)
+
+    // 大写 UUID 不接受：同一实体两条缓存 + 两次一模一样的回源不划算
+    const callsBefore = mb.urls.length
+    const upper = await call(`/api/v1/musicbrainz/artist/${MBID.toUpperCase()}`)
+    expect(upper.status).toBe(400)
+    expect(((await upper.json()) as { code: string; details: { field: string } }).details.field).toBe('mbid')
+    expect(mb.urls).toHaveLength(callsBefore)
+
+    const withInc = await call(`/api/v1/musicbrainz/artist/${MBID}?inc=url-rels`)
+    expect(withInc.status).toBe(200)
+    expect(new URL(mb.urls.at(-1)!).searchParams.get('inc')).toBe('url-rels')
+
+    const group = await call(`/api/v1/musicbrainz/release-group/b7db08f4-835a-4a69-970b-5321e6305032?inc=releases`)
+    expect(group.status).toBe(200)
+    expect(new URL(mb.urls.at(-1)!).pathname).toBe('/ws/2/release-group/b7db08f4-835a-4a69-970b-5321e6305032')
+
+    const release = await call('/api/v1/musicbrainz/release/537dbe0e-d03d-4293-bd8a-dffcb0d641b4?inc=recordings')
+    expect(release.status).toBe(200)
+    expect(new URL(mb.urls.at(-1)!).searchParams.get('inc')).toBe('recordings')
+  })
+
+  it('musicbrainz 非法 MBID/inc/type 一律 400，不回源', async () => {
+    const before = mb.urls.length
+    for (const path of [
+      '/api/v1/musicbrainz/artist/not-a-uuid',
+      '/api/v1/musicbrainz/artist/a74b1b7f71a540119441d0b5e4122711',
+      '/api/v1/musicbrainz/release-group/..%2F..%2Fetc',
+      '/api/v1/musicbrainz/artist/A74B1B7F-71A5-4011-9441-D0B5E4122711',
+      `/api/v1/musicbrainz/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711?inc=genres,tags`,
+      `/api/v1/musicbrainz/artist/a74b1b7f-71a5-4011-9441-d0b5e4122711?inc=recordings`,
+      '/api/v1/musicbrainz/search?q=a&type=label',
+      '/api/v1/musicbrainz/search?q=',
+    ]) {
+      const res = await call(path)
+      expect(res.status).toBe(400)
+      expect(((await res.json()) as { code: string }).code).toBe('INVALID_PARAMETER')
+    }
+    expect(mb.urls.length).toBe(before)
+  })
+
+  it('openmeteo current/hourly：默认单位补齐、单位枚举与 timezone 透传', async () => {
+    const res = await call('/api/v1/openmeteo/current?latitude=39.74&longitude=-97.09&current=temperature_2m')
+    expect(res.status).toBe(200)
+    const url = new URL(om.urls.at(-1)!)
+    expect(url.origin + url.pathname).toBe('https://api.open-meteo.com/v1/forecast')
+    expect(url.searchParams.get('current')).toBe('temperature_2m')
+    expect(url.searchParams.get('timezone')).toBe('auto')
+    expect(url.searchParams.get('temperature_unit')).toBe('celsius')
+    expect(url.searchParams.get('wind_speed_unit')).toBe('kmh')
+    expect(url.searchParams.get('precipitation_unit')).toBe('mm')
+    const body = (await res.json()) as { current: { interval: number; temperature_2m: number } }
+    expect(body.current.interval).toBe(900)
+
+    const custom = await call(
+      '/api/v1/openmeteo/hourly?latitude=52.52&longitude=13.41&hourly=temperature_2m,precipitation&forecast_days=16&temperature_unit=fahrenheit&wind_speed_unit=ms&timezone=Europe/Berlin',
+    )
+    expect(custom.status).toBe(200)
+    const h = new URL(om.urls.at(-1)!)
+    expect(h.searchParams.get('hourly')).toBe('temperature_2m,precipitation')
+    expect(h.searchParams.get('forecast_days')).toBe('16')
+    expect(h.searchParams.get('temperature_unit')).toBe('fahrenheit')
+    expect(h.searchParams.get('wind_speed_unit')).toBe('ms')
+    expect(h.searchParams.get('timezone')).toBe('Europe/Berlin')
+  })
+
+  it('openmeteo 坐标越界/畸形一律 400 且不回源（number 边界由框架兜）', async () => {
+    const before = om.urls.length
+    for (const path of [
+      '/api/v1/openmeteo/current?latitude=999&longitude=0&current=temperature_2m',
+      '/api/v1/openmeteo/current?latitude=-90.1&longitude=0&current=temperature_2m',
+      '/api/v1/openmeteo/current?latitude=0&longitude=180.1&current=temperature_2m',
+      '/api/v1/openmeteo/current?latitude=abc&longitude=0&current=temperature_2m',
+      '/api/v1/openmeteo/current?latitude=NaN&longitude=0&current=temperature_2m',
+      '/api/v1/openmeteo/current?latitude=1e3&longitude=0&current=temperature_2m',
+      '/api/v1/openmeteo/current?latitude=39.7&current=temperature_2m',
+      '/api/v1/openmeteo/current?latitude=39.7&longitude=0',
+      '/api/v1/openmeteo/hourly?latitude=39.7&longitude=0&hourly=temperature_2m&forecast_days=0',
+      '/api/v1/openmeteo/hourly?latitude=39.7&longitude=0&hourly=temperature_2m&forecast_days=17',
+    ]) {
+      const res = await call(path)
+      expect(res.status).toBe(400)
+      expect(((await res.json()) as { code: string }).code).toBe('INVALID_PARAMETER')
+    }
+    expect(om.urls.length).toBe(before)
+    // 边界值本身要放行
+    const edge = await call('/api/v1/openmeteo/current?latitude=-90&longitude=180&current=temperature_2m')
+    expect(edge.status).toBe(200)
+    const eu = new URL(om.urls.at(-1)!)
+    expect(eu.searchParams.get('latitude')).toBe('-90')
+    expect(eu.searchParams.get('longitude')).toBe('180')
+  })
+
+  it('openmeteo 变量表与单位枚举非法一律 400，不把上游的 Scala 类名漏出去', async () => {
+    const before = om.urls.length
+    for (const path of [
+      '/api/v1/openmeteo/current?latitude=39.7&longitude=0&current=bogus_var',
+      '/api/v1/openmeteo/current?latitude=39.7&longitude=0&current=temperature_2m,,weather_code',
+      '/api/v1/openmeteo/current?latitude=39.7&longitude=0&current=',
+      '/api/v1/openmeteo/current?latitude=39.7&longitude=0&current=temperature_2m&temperature_unit=kelvin',
+      '/api/v1/openmeteo/current?latitude=39.7&longitude=0&current=temperature_2m&wind_speed_unit=knots',
+      '/api/v1/openmeteo/current?latitude=39.7&longitude=0&current=temperature_2m&precipitation_unit=cm',
+      '/api/v1/openmeteo/current?latitude=39.7&longitude=0&current=temperature_2m&timezone=Mars%20Olympus',
+      '/api/v1/openmeteo/current?latitude=39.7&longitude=0&current=temperature_2m&evil=1',
+    ]) {
+      const res = await call(path)
+      expect(res.status).toBe(400)
+      const body = (await res.json()) as { code: string; message: string }
+      expect(body.code).toBe('INVALID_PARAMETER')
+      // 上游拼错变量名时会把内部类名漏进 reason，所以必须在本地拒
+      expect(body.message).not.toMatch(/Variable|VariableAndPrevious/)
+    }
+    expect(om.urls.length).toBe(before)
+  })
+
+  it('openmeteo geocode：写死 format=json，空地名 400，查无此城照常透传', async () => {
+    const res = await call('/api/v1/openmeteo/geocode?name=Wichita')
+    expect(res.status).toBe(200)
+    const url = new URL(omGeo.urls.at(-1)!)
+    expect(url.origin + url.pathname).toBe('https://geocoding-api.open-meteo.com/v1/search')
+    expect(url.searchParams.get('format')).toBe('json')
+    expect(url.searchParams.get('count')).toBe('5')
+    expect(url.searchParams.get('language')).toBe('en')
+    const body = (await res.json()) as { results: { name: string }[] }
+    expect(body.results[0]?.name).toBe('Wichita')
+
+    // 空地名上游回 200 但没有 results（只有 generationtime_ms），必须自己拒
+    const before = omGeo.urls.length
+    for (const path of [
+      '/api/v1/openmeteo/geocode?name=',
+      '/api/v1/openmeteo/geocode?name=%20',
+      '/api/v1/openmeteo/geocode?name=Wichita&count=0',
+      '/api/v1/openmeteo/geocode?name=Wichita&count=101',
+      '/api/v1/openmeteo/geocode?name=Wichita&language=zh-CN',
+    ]) {
+      const bad = await call(path)
+      expect(bad.status).toBe(400)
+      expect(((await bad.json()) as { code: string }).code).toBe('INVALID_PARAMETER')
+    }
+    expect(omGeo.urls.length).toBe(before)
+  })
+
+  it('openmeteo air-quality：独立变量表，current 与 hourly 至少要有一个', async () => {
+    const res = await call(
+      '/api/v1/openmeteo/air-quality?latitude=39.74&longitude=-97.09&current=pm2_5,us_aqi&hourly=european_aqi&forecast_days=7',
+    )
+    expect(res.status).toBe(200)
+    const url = new URL(omAq.urls.at(-1)!)
+    expect(url.origin + url.pathname).toBe('https://air-quality-api.open-meteo.com/v1/air-quality')
+    expect(url.searchParams.get('current')).toBe('pm2_5,us_aqi')
+    expect(url.searchParams.get('hourly')).toBe('european_aqi')
+    expect(url.searchParams.get('forecast_days')).toBe('7')
+    const body = (await res.json()) as { current: { us_aqi: number } }
+    expect(body.current.us_aqi).toBe(28)
+
+    const before = omAq.urls.length
+    for (const path of [
+      '/api/v1/openmeteo/air-quality?latitude=39.7&longitude=0',
+      // 天气变量混进空气质量表：两张表不通用
+      '/api/v1/openmeteo/air-quality?latitude=39.7&longitude=0&current=temperature_2m',
+      '/api/v1/openmeteo/air-quality?latitude=39.7&longitude=0&current=pm2_5&forecast_days=8',
+    ]) {
+      const bad = await call(path)
+      expect(bad.status).toBe(400)
+      expect(((await bad.json()) as { code: string }).code).toBe('INVALID_PARAMETER')
+    }
+    expect(omAq.urls.length).toBe(before)
+  })
+
+  it('/status 里 openmeteo 是零 key active，额度 4000', async () => {
+    const body = (await (await call('/status')).json()) as {
+      providers: { name: string; status: string; auth_optional?: boolean; auth_required?: boolean; credits?: { limit: number } | null }[]
+    }
+    const entry = body.providers.find((p) => p.name === 'openmeteo')!
+    expect(entry.status).toBe('active')
+    expect(entry.auth_required).toBe(false)
+    expect(entry.auth_optional).toBe(false)
+    expect(entry.credits?.limit).toBe(4000)
+    expect(body.providers.length).toBe(17)
+  })
+
+  it('openapi.json 与 llms.txt 覆盖 17 个 provider', async () => {
+    const doc = (await (await call('/openapi.json')).json()) as { paths: Record<string, unknown> }
+    expect(Object.keys(doc.paths)).toEqual(
+      expect.arrayContaining([
+        '/api/v1/openmeteo/current',
+        '/api/v1/openmeteo/hourly',
+        '/api/v1/openmeteo/geocode',
+        '/api/v1/openmeteo/air-quality',
+      ]),
+    )
+    const text = await (await call('/llms.txt')).text()
+    expect(text).toContain('/api/v1/openmeteo/current')
+  })
+
+  it('openapi.json 与 llms.txt 覆盖 16 个 provider', async () => {
+    const doc = (await (await call('/openapi.json')).json()) as { paths: Record<string, unknown> }
+    expect(Object.keys(doc.paths)).toEqual(
+      expect.arrayContaining([
+        '/api/v1/musicbrainz/search',
+        '/api/v1/musicbrainz/artist/{mbid}',
+        '/api/v1/musicbrainz/release-group/{mbid}',
+        '/api/v1/musicbrainz/release/{mbid}',
+      ]),
+    )
+    const text = await (await call('/llms.txt')).text()
+    expect(text).toContain('/api/v1/musicbrainz/search')
   })
 
   it('（P5 基线）openapi.json 与 llms.txt 覆盖 12 个 provider', async () => {

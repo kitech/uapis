@@ -14,6 +14,8 @@ import { def as pubmedDef, runtime as pubmedRuntime } from './pubmed'
 import { def as usgsDef, runtime as usgsRuntime } from './usgs'
 import { def as gitlabDef, runtime as gitlabRuntime } from './gitlab'
 import { def as cratesDef, runtime as cratesRuntime } from './crates'
+import { def as musicbrainzDef, runtime as musicbrainzRuntime } from './musicbrainz'
+import { def as openmeteoDef, runtime as openmeteoRuntime } from './openmeteo'
 import { def as stackexchangeDef, runtime as stackexchangeRuntime } from './stackexchange'
 
 /** 路由、OpenAPI、/status 与文档的唯一数据源 */
@@ -33,6 +35,8 @@ export const providers: ProviderDef[] = [
   usgsDef,
   gitlabDef,
   cratesDef,
+  musicbrainzDef,
+  openmeteoDef,
 ]
 
 const runtimes = new Map<string, ProviderRuntime>(
@@ -52,6 +56,8 @@ const runtimes = new Map<string, ProviderRuntime>(
     usgsRuntime,
     gitlabRuntime,
     cratesRuntime,
+    musicbrainzRuntime,
+    openmeteoRuntime,
   ].map(
     (runtime) => [runtime.name, runtime],
   ),

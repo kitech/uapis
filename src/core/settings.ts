@@ -15,7 +15,7 @@ export const SETTINGS_DEFAULTS: Readonly<Record<string, string>> = Object.freeze
   'gate.min_ms': '',
   'cors.origins': '*',
   'upstream.allowlist':
-    'api.stackexchange.com,hn.algolia.com,api.github.com,dev.to,export.arxiv.org,api.zenrows.com,r.jina.ai,lobste.rs,itunes.apple.com,api.crossref.org,pypi.org,registry.npmjs.org,eutils.ncbi.nlm.nih.gov,earthquake.usgs.gov,gitlab.com,crates.io',
+    'api.stackexchange.com,hn.algolia.com,api.github.com,dev.to,export.arxiv.org,api.zenrows.com,r.jina.ai,lobste.rs,itunes.apple.com,api.crossref.org,pypi.org,registry.npmjs.org,eutils.ncbi.nlm.nih.gov,earthquake.usgs.gov,gitlab.com,crates.io,musicbrainz.org,api.open-meteo.com,geocoding-api.open-meteo.com,air-quality-api.open-meteo.com',
   'queue.daily_limit': '3000',
   'queue.soft_limit': '2700',
   'warm.list': '',
@@ -41,6 +41,8 @@ export const SETTINGS_DEFAULTS: Readonly<Record<string, string>> = Object.freeze
   'quota.usgs.default': '4000',
   'quota.gitlab.default': '5000',
   'quota.crates.default': '3000',
+  'quota.musicbrainz.default': '4000',
+  'quota.openmeteo.default': '4000',
 })
 
 const MEMO_TTL_MS = 30_000
