@@ -269,6 +269,38 @@
   不同意就把这个 provider 从 `src/providers/index.ts` 里摘掉，
   代理机制本身（`pickChannel` / `quota.proxy.*` / tier C 校验）与它无关
 
+### xda · 不接入 ❌
+
+- 站点：`xdaforums.com`（原 `forum.xda-developers.com` / `www.xda-developers.com`，现由 BunnyCDN 承载）
+- 结论：**不合规，且技术上拿不到"热榜"**——两个理由各自独立成立，任一成立即出局
+- 条款（Valnet ToS <https://www.valnetinc.com/en/terms-of-use>，2026-01-12 更新，
+  适用范围明文含 "forums, RSS feeds"）分层读下来：
+  - §7 RSS Feeds：**认可**使用 RSS，唯一条件是不得改动 feed
+  - §5 Use of Content：允许非商业复制 "extracts, quotes"，但强制 credit + link；
+    其余 redistribution "strictly prohibited"
+  - §3 Grant of Limited License：personal、non-commercial、**non-transferrable、
+    non-sub-licensable**；§5 另写 "not for the use or benefit of any third party"
+    → 公开 API 再分发超出授权范围（本项目就是公开 API）
+  - §15 Illegal Use：禁 "crawl or spider"、"scrape, automatically download, data-mine,
+    extract, collect, or harvest"（**明文含 User Submissions**）、禁为开发软件而使用其内容
+- 需求落空：XenForo 内核 `Forum.php` 的 `order` 只有 `post_date` 与 `last_post_date`
+  两个分支，**不存在 hot 排序**（"热榜"是 Discourse 的 `/hot`）。所以唯一合规通路
+  只能给时间序的"最新帖流"——而需求明确要热度不要时序
+- 上游实测：本环境对 `xdaforums.com` **整站 403**（诚实 UA / curl 默认 UA / 完全不带 UA
+  响应完全一致，42,747B BunnyCDN 拦截页），`/robots.txt` 与 `/forums/-/index.rss` 同样 403，
+  所以新域的 robots 规则至今没读到；Valnet 那份 robots.txt 属旧域，不覆盖新域
+- 同类项目都收敛到同一结论：
+  - `theimpulson/ReLabs`（Apache 2.0）：逆向官方 App 的 OAuth2 参数 + XenForo API，
+    能用但**需用户账号**，且 §15 禁 reverse engineering
+  - `8Dionysus/aoa-xda-connector`：公开的同类 XDA 检索连接器，`SOURCE_POLICY.md` 里主动写明
+    "must not use XDA internal search as a crawler or data source"，只吃 sanitized 离线
+    fixture，live 抓取 "intentionally deferred"
+  - 2024 年一篇复盘：sitemap+HTML 抓 6M 页 / 68M 帖 / 60GB → **被 IP ban**，转而利用
+    Android App API "doesn't authenticate users to ensure that they have a token" 的漏洞续抓，
+    报告 moderator 后通路被收紧
+  - `TUVIMEN/forumscraper`：通用 XenForo 批量归档器，纯 §15 违规形态
+- 归属：论坛内容是 UGC，版权归各作者，XDA 自己都写明 "has no legal power" 去主张权利
+
 ## 计划中
 
 以下源已列入路线图，接入时逐条过上面的 checklist：
@@ -278,6 +310,8 @@
 - 尚未接入的 Open-Meteo 子集（都可用，只是没做）：`daily` 变量表、历史/预报档案（`archive`）、
   高程（`elevation`）、海洋预报（`marine`）、洪水（`flood`）
 - **需 key 源**（tier B）：F-Droid、YouTube Data API、Phonark/Last.fm、Telegram Bot API
+- **已排除**：XDA（`xdaforums.com`）热榜——Valnet ToS 禁抓取/建数据集/再分发，
+  且 XenForo 内核无 hot 排序；完整证据链见上方「xda · 不接入 ❌」
 
 > 说明：dev.to / GitHub / arXiv 已于 P2 接入，lobsters / itunes / crossref 于 P4 接入，
 > PyPI / npm registry / PubMed 于 P5 接入，USGS / GitLab / crates.io 于 P6 接入，MusicBrainz 于 P7 接入，Open-Meteo 于 P8 接入（见上）。
@@ -300,3 +334,9 @@
 - 上游改条款或改 API 时，同步更新 `tos` / `limits` 字段（它们直接暴露在 `/status`）
 - `minIntervalMs` 与每日额度按实际用量调整：看 `/status` 的 `quota` 与 `gate`
 - 出现持续 502 时先查 `/status` 的 `gate` 与 `stats`，确认不是本地闸门在挡
+- **github search 有 secondary rate limit**：命中时回 403/429，且 `Retry-After` 可能被
+  故意省略（GitHub support 称其为防滥用的 obfuscation，只能靠响应体里的
+  `"You have exceeded a secondary rate limit"` 识别）。本项目靠 `retries: 0` + 负缓存兜住；
+  若将来给它开重试，必须先解决这个"读不到退避时长"的问题
+- **`incomplete_results: true` 是正常业务态**，不是错误：官方文档说查询超时会返回已找到的
+  部分并把该标记置 true。`github` 的 transform 保留这个字段、不隐藏也不当失败处理

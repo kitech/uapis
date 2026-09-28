@@ -128,7 +128,26 @@ function defaultHandlers(): ReturnType<typeof http.get>[] {
     }),
     http.get(`${GH}/search/repositories`, ({ request }) => {
       gh.urls.push(request.url)
-      return HttpResponse.json({ total_count: 1, items: [{ full_name: 'cloudflare/workers-sdk' }] })
+      return HttpResponse.json({
+        total_count: 4926,
+        incomplete_results: false,
+        items: [
+          {
+            full_name: 'cloudflare/workers-sdk',
+            html_url: 'https://github.com/cloudflare/workers-sdk',
+            description: 'Home to the Workers SDK',
+            stargazers_count: 6758,
+            language: 'TypeScript',
+            created_at: '2026-08-30T00:00:00Z',
+            updated_at: '2026-09-01T00:00:00Z',
+            topics: ['android', 'serverless'],
+            license: { key: 'apache-2.0', name: 'Apache License 2.0' },
+            owner: { login: 'cloudflare', id: 1 },
+            node_id: 'R_kgDOAAA',
+            security_and_analysis: { secret_scanning: { status: 'enabled' } },
+          },
+        ],
+      })
     }),
     http.get(`${DEVTO}/articles/:id`, ({ request }) => {
       devto.urls.push(request.url)
@@ -690,6 +709,98 @@ describe('P2 零 key 源', () => {
     expect(res.status).toBe(400)
     expect(((await res.json()) as { code: string }).code).toBe('INVALID_PARAMETER')
     expect(gh.urls.length).toBe(before)
+  })
+
+  it('github 搜索的 per_page 封顶 30，100 条不回源（上游 557,300B 超 512KB 上限）', async () => {
+    const before = gh.urls.length
+    const res = await call('/api/v1/github/search/repositories?q=android&per_page=100')
+    expect(res.status).toBe(400)
+    expect(((await res.json()) as { code: string }).code).toBe('INVALID_PARAMETER')
+    expect(gh.urls.length).toBe(before)
+  })
+
+  it('github 搜索接受 help-wanted-issues 排序（官方四项之一）', async () => {
+    const res = await call('/api/v1/github/search/repositories?q=android&sort=help-wanted-issues')
+    expect(res.status).toBe(200)
+    expect(gh.urls.at(-1)).toContain('sort=help-wanted-issues')
+  })
+
+  it('github/android/rising 把 topic:android 写死，调用方注入未声明的 topic 直接 400', async () => {
+    // 路由层对未声明 query 一律 400（v1.ts 的 unknown query parameter），
+    // 所以"topic 被忽略"根本不会发生，更不会退化成通用搜索器
+    const before = gh.urls.length
+    const res = await call('/api/v1/github/android/rising?since=2026-08-28&topic=rust')
+    expect(res.status).toBe(400)
+    const err = (await res.json()) as { code: string; message: string; details?: { allowed?: string[] } }
+    expect(err.code).toBe('INVALID_PARAMETER')
+    expect(err.message).toMatch(/unknown query parameter/)
+    expect(err.details?.allowed).toEqual(['since', 'per_page', 'page'])
+    expect(gh.urls.length).toBe(before)
+  })
+
+  it('github/android/rising 上游 URL 里 topic/sort/order 都是服务端写死的', async () => {
+    const res = await call('/api/v1/github/android/rising?since=2026-08-28')
+    expect(res.status).toBe(200)
+    const last = gh.urls.at(-1) ?? ''
+    expect(last).toContain('topic%3Aandroid')
+    expect(last).toContain('created%3A%3E2026-08-28')
+    expect(last).toContain('sort=stars')
+    expect(last).toContain('order=desc')
+  })
+
+  it('github/android/rising transform 丢掉 license/owner/node_id 等 74 个字段', async () => {
+    const res = await call('/api/v1/github/android/rising?since=2026-08-28')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as {
+      provider: string
+      total_count: number
+      incomplete_results: boolean
+      items: Record<string, unknown>[]
+    }
+    expect(body.provider).toBe('github')
+    expect(body.total_count).toBe(4926)
+    expect(body.incomplete_results).toBe(false)
+    expect(Object.keys(body.items[0]!).sort()).toEqual([
+      'created_at',
+      'description',
+      'full_name',
+      'html_url',
+      'language',
+      'stargazers_count',
+      'topics',
+      'updated_at',
+    ])
+  })
+
+  it('github/android/rising 缺 since 或日期非法直接 400，不回源', async () => {
+    const before = gh.urls.length
+    for (const qs of [
+      '',
+      '?since=',
+      '?since=2026-8-28',
+      '?since=20260828',
+      '?since=2026-08-28x',
+      '?since=2026-13-45',
+      '?since=2026-08-32',
+    ]) {
+      const res = await call(`/api/v1/github/android/rising${qs}`)
+      expect(res.status).toBe(400)
+      expect(((await res.json()) as { code: string }).code).toBe('INVALID_PARAMETER')
+    }
+    expect(gh.urls.length).toBe(before)
+  })
+
+  it('github/android/rising 的 per_page 封顶 30', async () => {
+    const res = await call('/api/v1/github/android/rising?since=2026-08-28&per_page=31')
+    expect(res.status).toBe(400)
+  })
+
+  it('github/android/rising 同一 since 二次请求命中缓存', async () => {
+    const before = gh.urls.length
+    await call('/api/v1/github/android/rising?since=2026-08-28&per_page=10')
+    const res = await call('/api/v1/github/android/rising?since=2026-08-28&per_page=10')
+    expect(res.headers.get('x-cache')).toBe('HIT')
+    expect(gh.urls.length).toBe(before + 1)
   })
 
   it('devto 单篇文章透传', async () => {

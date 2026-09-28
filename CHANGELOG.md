@@ -5,7 +5,8 @@
 ## [0.1.0] - 2026-09-27
 
 P0 骨架 + P1 端点完善 + P2 零 key 源批量接入 + P3 付费代理通道 + P4 再加三个零 key 源
-+ P5 包管理与文献检索三个零 key 源 + P6 开放数据与代码托管三个零 key 源 + P7 音乐元数据零 key 源 + P8 天气与空气质量零 key 源。
++ P5 包管理与文献检索三个零 key 源 + P6 开放数据与代码托管三个零 key 源 + P7 音乐元数据零 key 源
++ P8 天气与空气质量零 key 源 + P9 github Android 新星榜（并修 github search 的超时与 `per_page` 缺陷）。
 
 ### Added
 
@@ -121,7 +122,28 @@ P0 骨架 + P1 端点完善 + P2 零 key 源批量接入 + P3 付费代理通道
   两者都取不到就宁可少报也不报假年龄
 - P7 收尾：musicbrainz 的 `release-group`/`release` 改用 `item` 缓存档（原来与 artist 共用 profile），
   修正无效的 ToS URL
-- 离线测试：`vitest-pool-workers` + `@msw/cloudflare` 出站拦截，214 个用例全离线
+- P9 新增 github 端点 `androidRising` → `/api/v1/github/android/rising`（"Android 新星榜"）：
+  时间窗内新建、star 最高的 Android 仓库；`topic:android` 与 `sort=stars&order=desc`
+  服务端写死（放开 topic 就退化成通用搜索器），调用方只给 `since`（`YYYY-MM-DD`）定时间窗
+  - **为什么不用 GitHub Trending**：Trending 只有 HTML 页、没有官方 API，解析 HTML 违反本项目原则；
+    用官方 search 的 `created:>+sort=stars` 构造同等语义
+  - **transform 而非透传**：上游每项 82 字段、30 项 164,439B，输出只留 8 字段降到 15,246B（省 92%），
+    与 pypi 丢掉 README 全文、crates 丢掉 versions 同理
+  - `since` 由调用方传而非 `days`：缓存键只对请求侧白名单 query 做哈希、不含上游 URL
+    （`refresh.ts` 的 `cacheKeyFor` → `ttl.ts` 的 `buildCacheKey`），服务端算的日期会漏出缓存键
+  - `since` 校验形状 + 真实日期：`2026-13-45` / `2026-08-32` 本地挡住（上游一律回 422）
+- **修 github search 端点的既存缺陷**：`fetcher.ts` 的 `DEFAULT_TIMEOUT_MS = 3000` 被 github
+  完整继承（该 provider 此前一处 `timeoutMs` 都没设），而上游 30 条实测 4.7/1.9/3.0s（偶发 9s）
+  → 现有 `/api/v1/github/search/repositories` 在默认页大小下经常超时。
+  现在 search 与新端点都 `timeoutMs: 12000` + `retries: 0`
+- **github search 的 `per_page` 从 100 封顶到 30**：实测 `per_page=100` 能返回 200，但体积
+  557,300B 超过 `MAX_UPSTREAM_BYTES`（512KB）会被直接判超限——**理由是体积，不是超时**
+- **github search 的 `sort` 补齐 `help-wanted-issues`**：官方 OpenAPI 与 `cli/cli` 都是
+  stars/forks/help-wanted-issues/updated 四项，此前漏了它，调用方传该项会 400
+- XDA（`xdaforums.com`）热榜**确认不接入**，证据链存入 `provider-audit.md`：
+  Valnet ToS §7/§5/§3/§15 四层条款（§7 认可 RSS、§15 禁爬且明文含 User Submissions）、
+  XenForo 内核无 hot 排序、域已迁 BunnyCDN、四个同类项目先例（含一个公开选择"不爬"的连接器）
+- 离线测试：`vitest-pool-workers` + `@msw/cloudflare` 出站拦截，232 个用例全离线
 - VitePress 文档站（首页/快速上手/数据源/限流/错误/合规 + 参考页），部署到同一 Worker 的 `/docs`
 
 ### Fixed

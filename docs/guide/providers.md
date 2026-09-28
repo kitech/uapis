@@ -13,7 +13,7 @@
 | B | 官方 API 但要注册 key | stackexchange |
 | C | 付费墙/非官方源，必须走付费代理通道 | economist |
 
-`github` 的三个端点都标了 `auth: 'optional'`：配了 `gh.token` 自动提额，不配也能匿名调用。
+`github` 的四个端点都标了 `auth: 'optional'`：配了 `gh.token` 自动提额，不配也能匿名调用。
 `/status` 会把它报成 `active` 并给出 `auth_required=false`，不会误报成 `unconfigured`。
 
 tier C 没有单一的 `auth.settingKey`，而是 `requiredAnyOf`：ZenRows / Jina 任一可用即可。
@@ -67,15 +67,39 @@ tier C 没有单一的 `auth.settingKey`，而是 `requiredAnyOf`：ZenRows / Ji
 | 方法 | 路径 | 参数 |
 | --- | --- | --- |
 | GET | `/api/v1/github/repo/{owner}/{repo}` | 路径 `owner` + `repo` |
-| GET | `/api/v1/github/search/repositories` | `q`（必填）、`sort`(stars/forks/updated)、`order`、`per_page`(1-100, 默认 30)、`page`(1 起, 默认 1) |
+| GET | `/api/v1/github/search/repositories` | `q`（必填）、`sort`(stars/forks/help-wanted-issues/updated)、`order`、`per_page`(1-30, 默认 30)、`page`(1 起, 默认 1) |
+| GET | `/api/v1/github/android/rising` | `since`(必填, `YYYY-MM-DD`)、`per_page`(1-30, 默认 20)、`page`(1 起, 默认 1) |
 | GET | `/api/v1/github/user/{login}` | 路径 `login`：`^[A-Za-z0-9-]{1,39}$` |
 
 - host：`api.github.com`
 - 匿名 60 次/小时（core）、10 次/分钟（search）；配 `gh.token` 后 5000 次/小时
-- 闸门取最严的 6000ms：闸门是 provider 级的，宁可慢也不能撞上 search 的 10 次/分钟
+- 闸门取最严的 6000ms：按**匿名** search 的 10 次/分钟定的（认证后是 30 次/分钟，
+  闸门更严所以无副作用），闸门是 provider 级的，宁可慢也不能撞上 10 次/分钟
 - token 走 `Authorization: Bearer` 头，不进 query，因此不会进日志和缓存键
-- 三个端点都标了 `auth: 'optional'`：不配 token 也能用，`/status` 里 `auth_required=false`
+- 四个端点都标了 `auth: 'optional'`：不配 token 也能用，`/status` 里 `auth_required=false`
 - 只取元数据。README 全文、源码这类大文件不走本项目，raw 域名也不在白名单里
+
+**Android 新星榜** `/api/v1/github/android/rising`：时间窗内新建、star 最高的 Android 仓库。
+`topic:android` 与 `sort=stars&order=desc` 由服务端写死，调用方只给 `since` 定时间窗——
+`topic` 要是放开，这个端点就退化成通用搜索器。另外未声明的 query 一律 400，
+所以调用方也没法偷偷覆盖 `topic`。
+
+```bash
+curl "https://<你的域名>/api/v1/github/android/rising?since=2026-08-28&per_page=20"
+```
+
+- **为什么不用 GitHub Trending**：Trending 只有 HTML 页、没有官方 API，解析 HTML 违反本项目原则；
+  用官方 search 的 `created:>+sort=stars` 构造同等语义
+- **transform 而非透传**：上游每项 82 个字段、30 项 164,439B，输出只留 8 字段降到 15,246B（省 92%），
+  与 pypi 丢掉 README 全文、crates 丢掉 versions 同理
+- `since` 由调用方传而不是 `days`：缓存键只对**请求侧白名单 query** 做哈希、不含上游 URL，
+  服务端算出来的日期会漏出缓存键，昨天的时间窗今天照样命中
+- `since` 校验形状 + 真实日期：`2026-13-45` / `2026-08-32` 会被本地挡住（上游一律回 422）
+
+**实测约束**（2026-09 探测）：`per_page=1` 5,663B/0.8s；`per_page=30` 164,439B，
+连测三次 4.7/1.9/3.0s（**默认 3s 超时就在边缘**，所以两个 search 端点都放宽到 12s）；
+`per_page=100` 能返回 200 但 **557,300B，直接超 `MAX_UPSTREAM_BYTES`（512KB）** →
+两个端点都封顶 30，**理由是体积不是超时**。`retries: 0`，重试要花 search 的 10 次/分钟预算。
 
 ## DEV Community（DEV.to）· tier A-
 

@@ -71,7 +71,7 @@ curl -X PUT http://localhost:8787/admin/settings \
 
 ```bash
 npm run typecheck        # tsc --noEmit
-npm test                 # 214 个离线测试，不发真实请求
+npm test                 # 232 个离线测试，不发真实请求
 npm run deploy:dry       # 构建文档 + dry-run，检查产物 < 64MiB
 ```
 

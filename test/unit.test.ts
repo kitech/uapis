@@ -341,10 +341,10 @@ describe('P2 零 key 源回源计划', () => {
     const plan = await gh.buildPlan(env, {
       op: 'search',
       id: '',
-      query: [['q', 'workers runtime'], ['sort', 'stars'], ['per_page', '50'], ['page', '2']],
+      query: [['q', 'workers runtime'], ['sort', 'stars'], ['per_page', '30'], ['page', '2']],
     })
     expect(plan.url).toBe(
-      'https://api.github.com/search/repositories?q=workers%20runtime&per_page=50&page=2&sort=stars&order=desc',
+      'https://api.github.com/search/repositories?q=workers%20runtime&per_page=30&page=2&sort=stars&order=desc',
     )
     await expect(
       gh.buildPlan(env, { op: 'search', id: '', query: [['sort', 'nope']] }),
@@ -352,6 +352,99 @@ describe('P2 零 key 源回源计划', () => {
     await expect(
       gh.buildPlan(env, { op: 'search', id: '', query: [['q', 'a'], ['sort', 'nope']] }),
     ).rejects.toThrow(/invalid sort/)
+  })
+
+  it('github 搜索接受官方四个 sort 值（含此前漏掉的 help-wanted-issues）', async () => {
+    for (const sort of ['stars', 'forks', 'help-wanted-issues', 'updated']) {
+      const plan = await gh.buildPlan(env, {
+        op: 'search',
+        id: '',
+        query: [['q', 'a'], ['sort', sort]],
+      })
+      expect(plan.url).toContain(`sort=${sort}`)
+    }
+  })
+
+  it('github 搜索显式放宽超时（原先继承 fetcher 的 3s 默认，上游 30 条实测 1.9~4.7s）', async () => {
+    const plan = await gh.buildPlan(env, { op: 'search', id: '', query: [['q', 'android']] })
+    expect(plan.timeoutMs).toBe(12_000)
+    expect(plan.retries).toBe(0)
+  })
+
+  it('github 新星榜把 topic/sort/order 写死，只有 since 留给调用方', async () => {
+    const plan = await gh.buildPlan(env, {
+      op: 'androidRising',
+      id: '',
+      query: [['since', '2026-08-28'], ['per_page', '20'], ['page', '1']],
+    })
+    expect(plan.url).toBe(
+      'https://api.github.com/search/repositories?q=topic%3Aandroid%20created%3A%3E2026-08-28&sort=stars&order=desc&per_page=20&page=1',
+    )
+    expect(plan.timeoutMs).toBe(12_000)
+    expect(plan.retries).toBe(0)
+  })
+
+  it('github 新星榜拒绝不存在的日期（形状合法但 2026-13-45 上游回 422）', async () => {
+    for (const bad of ['2026-13-45', '2026-08-32', '2026-02-30', '0000-01-01']) {
+      await expect(
+        gh.buildPlan(env, { op: 'androidRising', id: '', query: [['since', bad]] }),
+      ).rejects.toThrow(/invalid since/)
+    }
+  })
+
+  it('github 新星榜的 since 必须是 YYYY-MM-DD 形状', async () => {
+    for (const bad of ['', '2026-8-28', '20260828', '>2026-08-28', '2026-08-28&sort=forks', '2026-08-28x']) {
+      await expect(
+        gh.buildPlan(env, { op: 'androidRising', id: '', query: [['since', bad]] }),
+      ).rejects.toThrow(/invalid since/)
+    }
+  })
+
+  it('github transform 只留 8 个字段并带上 provider 标', () => {
+    const raw = JSON.stringify({
+      total_count: 4926,
+      incomplete_results: false,
+      items: [
+        {
+          full_name: 'a/b',
+          html_url: 'https://github.com/a/b',
+          stargazers_count: 6758,
+          topics: ['android'],
+          license: { key: 'apache-2.0', name: 'Apache License 2.0' },
+          owner: { login: 'a', id: 1 },
+          node_id: 'R_kgDOAAA',
+          security_and_analysis: { secret_scanning: { status: 'enabled' } },
+        },
+      ],
+    })
+    const text = gh.transform?.(raw, { op: 'androidRising', id: '', query: [] })?.text
+    const out = JSON.parse(text ?? '{}') as { provider: string; items: Record<string, unknown>[] }
+    expect(out.provider).toBe('github')
+    expect(Object.keys(out.items[0]!).sort()).toEqual([
+      'full_name',
+      'html_url',
+      'stargazers_count',
+      'topics',
+    ])
+  })
+
+  it('github transform 保留 incomplete_results 标记且缺 items 时不炸', () => {
+    const slow = JSON.parse(
+      gh.transform?.(JSON.stringify({ incomplete_results: true, items: [] }), {
+        op: 'androidRising',
+        id: '',
+        query: [],
+      })?.text ?? '{}',
+    ) as { incomplete_results: boolean; total_count: number; items: unknown[] }
+    expect(slow.incomplete_results).toBe(true)
+    expect(slow.total_count).toBe(0)
+    expect(slow.items).toEqual([])
+  })
+
+  it('github transform 遇到非 JSON 抛 502 而不是 500', () => {
+    expect(() =>
+      gh.transform?.('<html>nope</html>', { op: 'androidRising', id: '', query: [] }),
+    ).toThrow(/non-JSON/)
   })
 
   it('devto 列表把 tag/username/state/top 拼好', async () => {
