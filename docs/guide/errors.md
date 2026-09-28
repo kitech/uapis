@@ -25,14 +25,14 @@
 | `FORBIDDEN` | 403 | 已知身份但不允许 | 检查 scope |
 | `NOT_FOUND` | 404 | 路由不存在或上游 404 | 检查路径 |
 | `NO_MATCH` | 404 | 路径合法但没有结果 | 正常业务结果 |
-| `FILE_TOO_LARGE` | 413 | 上游响应超过 2MB 上限 | 用更精确的查询 |
+| `FILE_TOO_LARGE` | 413 | 上游响应超过 512KB 上限（`MAX_UPSTREAM_BYTES`） | 用更精确的查询 |
 | `RATE_LIMITED` | 429 / 503 | 入口限流（429）或 provider 闸门冷却（503） | 看 `Retry-After` / `details.retry_in` |
 | `INTERNAL_ERROR` | 500 | Worker 内部异常 | 带上 `X-Request-ID` 反馈 |
 | `UPSTREAM_ERROR` | 502 | 上游 5xx | 稍后重试，会命中负缓存 |
 | `PROVIDER_UNCONFIGURED` | 503 | 缺 key，或付费通道一个都没配 | 配 `details.setting` 指定的设置项；tier C 看 `details.any_of`，配其中任意一个 |
 | `QUOTA_EXHAUSTED` | 503 | 今日队列/上游额度用尽（`quota.<provider>.default` 或 `quota.proxy.*`） | 等 UTC 日切或调大额度；`details.provider` / `details.channel` 说明是哪个桶 |
 | `REBUILDING` | 503 | 已入队但还没有数据 | 按 `Retry-After` 重试 |
-| `SERVICE_UNAVAILABLE` | 503 | 只读/维护模式 | 看 `details.mode` |
+| `SERVICE_UNAVAILABLE` | 503 | 只读/维护模式且无缓存可返回 | 看 `details.mode`；只读模式下**已有缓存照常返回**，503 只出现在完全没有缓存时 |
 | `UPSTREAM_TIMEOUT` | 504 | 上游超时（含"连上了但正文没到"） | 缩小查询范围 |
 | `ACCEPTED` | 202 | 配合 `Prefer: respond-async`，已入队 | 轮询同一路径 |
 
@@ -41,6 +41,8 @@
 1. 看 `X-Request-ID`，把同一个值带进日志搜索。
 2. 看 `X-Cache`：
    - `HIT`/`HIT-T1` → 不是缓存问题
+   - `STALE` → 返回的是旧值，后台正在刷新
+   - `STALE-FALLBACK` → 旧值已超出 stale 窗口，只在回源失败时当兜底
    - `NEGATIVE` → 上游之前失败过，6 小时内不再回源，等 TTL 或 `POST /admin/rebuild`
    - `QUEUED` → 内联回源关着，或者在队列额度里
 3. `/status` 看 `gate`（哪个 provider 冷却中）、`queue.used`、`cache.rows`、
@@ -53,8 +55,10 @@
 `REFRESH` 表示本次同步回源并写了缓存，这是设计行为。
 
 **`503 RATE_LIMITED` 但我只有一个请求？**
-provider 闸门是按 provider 全局的最小间隔（当前 300ms）。别的 key 刚刷新过同一个 provider，
-你的请求就进冷却了。可以在测试/自用场景把 `gate.min_ms` 调小。
+provider 闸门是按 provider 全局的最小间隔（registry 里 200–6000ms：GitHub 6000ms 对齐
+search 的 10 次/分钟，arXiv 3000ms，MusicBrainz / Open-Meteo 1000ms，其余 200–500ms）。
+别的请求刚刷新过同一个 provider，你的请求就进冷却了。可以在测试/自用场景把
+`gate.min_ms` 调小（空值 = 用 registry 里的值）。
 
 **tier C 源报 `PROVIDER_UNCONFIGURED`，`details` 里没有 `setting` 只有 `any_of`？**
 对，tier C 没有单一 key：ZenRows / Jina 任一可用即可。

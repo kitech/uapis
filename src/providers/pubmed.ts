@@ -42,7 +42,7 @@ export const def: ProviderDef = {
   displayName: 'PubMed',
   tier: 'A-',
   auth: {
-    settingKey: 'ncbi.api_key',
+    settingKey: 'pubmed.api_key',
     label: 'NCBI API key（可选，3 → 10 次/秒）',
     signupUrl: 'https://www.ncbi.nlm.nih.gov/account/settings/',
   },
@@ -50,7 +50,7 @@ export const def: ProviderDef = {
   // NCBI 硬要求：3 次/秒（无 key）/ 10 次/秒（有 key）。400ms ≈ 2.5 次/秒，
   // 无 key 也在官方额度内；配了 key 想更快可以调低 gate.min_ms。
   minIntervalMs: 400,
-  uaNote: 'E-utilities 零 key 可用；配 ncbi.api_key 后走官方更高的速率档',
+  uaNote: 'E-utilities 零 key 可用；配 pubmed.api_key 后走官方更高的速率档',
   parseCostMs: 0,
   attribution: '题录（标题/作者/期刊）版权归作者与出版商，PubMed 只做索引',
   tos: 'https://www.ncbi.nlm.nih.gov/home/about/policies/',
@@ -142,7 +142,7 @@ export const runtime: ProviderRuntime = {
  * 它只发往 eutils.ncbi.nlm.nih.gov（白名单内的唯一出口），且不进本项目的缓存键。
  */
 async function apiKey(env: Env): Promise<string | undefined> {
-  const raw = (await getSetting(env, 'ncbi.api_key')).trim()
+  const raw = (await getSetting(env, 'pubmed.api_key')).trim()
   return API_KEY_PATTERN.test(raw) ? raw : undefined
 }
 

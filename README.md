@@ -57,16 +57,13 @@ npm run deploy:dry                  # 构建文档并 dry-run，产物需 < 64Mi
 
 ## 部署
 
-1. `npm run db:migrate`：把 `wrangler.jsonc` 中 `database_id` 换成真实 D1 ID 后执行。
-2. `npx wrangler secret put ADMIN_TOKEN`
-3. `npm run deploy`
-4. 在 Cloudflare 控制台给 Worker 绑定自定义域名，然后设置 `vars.SITE_URL` 为该域名并重新部署
-   （`SITE_URL` 决定 UA 尾串与 CORS 白名单，必须与真实域名一致）。
-5. 自定义域名生效后执行 T1 冒烟：`curl -i https://<域名>/api/v1/hackernews/search?q=cloudflare`
-   连打两次，第二次必须带 `X-Cache: HIT`。
-6. arXiv 的首次真实回源建议单独验一次（它有 3 秒闸门与 15 分钟缓存）：
-   `curl -i 'https://<域名>/api/v1/arxiv/search?search_query=cat:cs.LG&max_results=3'`，
-   响应体应是本项目的 JSON（`provider: "arxiv"`），不是 Atom XML。
+完整步骤见 **[docs/guide/deployment.md](docs/guide/deployment.md)**，最小顺序是：
+建 D1（`npx wrangler d1 create uapis` → 把 `database_id` 填进 `wrangler.jsonc`）→
+建队列（`npx wrangler queues create uapis-refresh`，**不能跳**）→ `npm run db:migrate` →
+`npm run deploy`（别裸跑 `wrangler deploy`，会丢 `/docs/`）→ `npx wrangler secret put ADMIN_TOKEN`
+→ 绑自定义域名后改 `vars.SITE_URL` 再部署一次。
+
+日常运维（回滚范围、Time Travel、只读模式、额度监控、部署失败速查）也在同一页。
 
 ## 文档
 
@@ -74,6 +71,7 @@ npm run deploy:dry                  # 构建文档并 dry-run，产物需 < 64Mi
 | --- | --- |
 | [docs/index.md](docs/index.md) | 快速上手 |
 | [docs/guide/quickstart.md](docs/guide/quickstart.md) | 第一个请求 |
+| [docs/guide/deployment.md](docs/guide/deployment.md) | 部署上线（自架步骤 + 运维手册） |
 | [docs/guide/providers.md](docs/guide/providers.md) | 数据源与凭据 |
 | [docs/guide/rate-limits.md](docs/guide/rate-limits.md) | 限流与免费额度 |
 | [docs/guide/errors.md](docs/guide/errors.md) | 错误码表与排障 |
@@ -85,7 +83,11 @@ npm run deploy:dry                  # 构建文档并 dry-run，产物需 < 64Mi
 ## 路线
 
 P0 骨架（已完成）→ P1 Stack Exchange/HN 完善与分页（已完成）→ P2 零 key 源批量接入（已完成：GitHub / DEV.to / arXiv）→
-P3 付费墙源（ZenRows + Jina 双通道）→ P4 管理与可观测 → P5 打磨发布。
+P3 付费墙源（ZenRows + Jina 双通道，已完成）→ P4 管理与可观测（`/admin/*`、`/status`、日志计数，已完成）→
+P5 包管理与文献检索（crates / Crossref / PyPI / npm / PubMed / iTunes，已完成）→
+P6 开放数据与代码托管（USGS / GitLab / Lobsters，已完成）→ P7 音乐元数据（MusicBrainz，已完成）→
+P8 天气与空气质量（Open-Meteo，已完成）→ P9 GitHub Android 新星榜（已完成）→
+P10 部署与运维文档（已完成：[docs/guide/deployment.md](docs/guide/deployment.md)）→ 发布。
 
 ## License
 

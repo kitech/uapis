@@ -41,7 +41,7 @@
 ### stackexchange · tier B ✅
 
 - 上游：`https://api.stackexchange.com/2.3`
-- 凭据：`se.key`（<https://stackapps.com/apps/oauth/register> 注册，约 10000 次/天；匿名约 300 次/天）
+- 凭据：`stackexchange.api_key`（<https://stackapps.com/apps/oauth/register> 注册，约 10000 次/天；匿名约 300 次/天）
 - 归属：内容版权归各站点作者，遵循 CC BY-SA
 - 条款：<https://stackoverflow.com/help/site-terms>
 - 额度文档：<https://api.stackexchange.com/docs/usage>
@@ -49,12 +49,12 @@
 - 全部 `passthrough`；key 作为 query 参数注入上游
 - `site` 参数走 `^[a-z0-9][a-z0-9.-]{1,34}$`，默认 `stackoverflow`
 - 额度：`quota.stackexchange.default` = 9500（留 5% 余量）
-- 未配置 key 时返回 `503 PROVIDER_UNCONFIGURED`，`details.setting = "se.key"`
+- 未配置 key 时返回 `503 PROVIDER_UNCONFIGURED`，`details.setting = "stackexchange.api_key"`
 
 ### github · tier A- ✅
 
 - 上游：`https://api.github.com`
-- 凭据：`gh.token` 可选（fine-grained PAT，<https://github.com/settings/personal-access-tokens>）；
+- 凭据：`github.token` 可选（fine-grained PAT，<https://github.com/settings/personal-access-tokens>）；
   匿名 core 60 次/小时、search 10 次/分钟，token 5000 次/小时
 - 端点全部标 `auth: 'optional'`，匿名可用；`/status` 报 `auth_required=false`
 - 闸门 6000ms：provider 级闸门取最严的约束（search 10 次/分钟）
@@ -150,7 +150,7 @@
 ### pubmed · tier A- ✅
 
 - 上游：`https://eutils.ncbi.nlm.nih.gov/entrez/eutils`
-- 凭据：**零 key 可用**；可选 `ncbi.api_key`（官方 3 → 10 次/秒）；
+- 凭据：**零 key 可用**；可选 `pubmed.api_key`（官方 3 → 10 次/秒）；
   申请 <https://www.ncbi.nlm.nih.gov/account/settings/>；
   使用规范 <https://www.ncbi.nlm.nih.gov/books/NBK25501/>
 - 端点：`search`（esearch，search 档）、`summary`（esummary `version=2.0`，item 档），均透传 JSON
@@ -159,7 +159,7 @@
   放行就会把错误体缓存下来
 - 不做 efetch（只能返回 XML/MEDLINE 文本，要引正则解析器）
 - 闸门 400ms（≈2.5 次/秒，无 key 也在官方 3 次/秒内）
-- `ncbi.api_key` 只发往 eutils（白名单唯一出口），不进缓存键；填错当没配
+- `pubmed.api_key` 只发往 eutils（白名单唯一出口），不进缓存键；填错当没配
 - 归属：题录版权归作者与出版商，PubMed 只做索引
 - 额度：`quota.pubmed.default` = 10000
 

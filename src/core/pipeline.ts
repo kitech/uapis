@@ -44,7 +44,11 @@ export async function serveResource(
   }
 
   if (found !== null && found.record.status === 200 && found.state === 'STALE') {
-    c.executionCtx.waitUntil(refreshInBackground(c, provider, key, target))
+    // 只读模式下不发这次刷新。refreshInBackground 直接入队、不查维护模式，
+    // 所以少了这个判断，stale 流量会在 readonly 期间照常烧队列和上游额度
+    if ((await getSetting(c.env, 'maintenance.mode')).toLowerCase() === 'active') {
+      c.executionCtx.waitUntil(refreshInBackground(c, provider, key, target))
+    }
     return serveHit(c, found, 'STALE')
   }
 
@@ -91,16 +95,21 @@ export async function serveResource(
     }
   }
 
-  if (fallback === null) {
-    const maintenance = (await getSetting(c.env, 'maintenance.mode')).toLowerCase()
-    if (maintenance !== 'active') {
-      return errorResponse(
-      c,
-        fail(ErrorCode.ServiceUnavailable, `maintenance mode: ${maintenance}`, 503, {
-          mode: maintenance,
-        }),
-      )
+  // 维护模式：有没有旧值都要判。以前这个判断套在 `fallback === null` 里面，
+  // 于是"有旧值"的几条路径全绕过了它——包括上面 STALE 分支的入队
+  const maintenance = (await getSetting(c.env, 'maintenance.mode')).toLowerCase()
+  if (maintenance !== 'active') {
+    if (fallback !== null) {
+      // 这条旧值已经超出 stale 窗口，本来只在回源失败时当兜底；只读模式下
+      // 根本没有回源可言，把它返回比 503 更有用
+      return serveHit(c, fallback, 'STALE-FALLBACK')
     }
+    return errorResponse(
+      c,
+      fail(ErrorCode.ServiceUnavailable, `maintenance mode: ${maintenance}`, 503, {
+        mode: maintenance,
+      }),
+    )
   }
 
   const inlineAllowed =

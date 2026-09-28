@@ -20,6 +20,7 @@ export default defineConfig({
         items: [
           { text: '介绍', link: '/' },
           { text: '快速上手', link: '/guide/quickstart' },
+          { text: '部署上线', link: '/guide/deployment' },
           { text: '数据源与凭据', link: '/guide/providers' },
         ],
       },

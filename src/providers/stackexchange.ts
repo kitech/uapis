@@ -79,7 +79,7 @@ export const def: ProviderDef = {
   displayName: 'Stack Exchange',
   tier: 'B',
   auth: {
-    settingKey: 'se.key',
+    settingKey: 'stackexchange.api_key',
     label: 'Stack Apps API key',
     signupUrl: 'https://stackapps.com/apps/oauth/register',
   },
@@ -176,7 +176,7 @@ export const runtime: ProviderRuntime = {
   name: def.name,
   async buildPlan(env, target): Promise<UpstreamPlan> {
     const site = normalizeSite(queryValue(target, 'site'))
-    const key = await getSetting(env, 'se.key')
+    const key = await getSetting(env, 'stackexchange.api_key')
 
     const withKey = (path: string): string => {
       const url = `${API}${path}`

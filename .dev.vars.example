@@ -3,6 +3,7 @@
 ADMIN_TOKEN=change-me-local-dev-token
 #
 # 上游凭据不放在这里，统一存 D1 settings（见 /admin/settings）：
-#   se.key  github.token  reddit.client_id  reddit.client_secret
-#   youtube.key  ph.key  lastfm.key  telegram.token
+#   stackexchange.api_key  github.token  pubmed.api_key
+#   reddit.client_id  reddit.client_secret  youtube.key
+#   ph.key  lastfm.key  telegram.token
 #   zenrows.key  jina.key

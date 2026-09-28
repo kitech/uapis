@@ -121,6 +121,12 @@ async function warm(env: Env): Promise<void> {
     return
   }
 
+  // 只读模式下预热没有意义：它就是自动回源，跑起来照常烧队列和上游额度
+  if ((await getSetting(env, 'maintenance.mode')).toLowerCase() !== 'active') {
+    await bumpStat(env, '__warm_skipped', list.length)
+    return
+  }
+
   let queued = 0
   for (const entry of list.slice(0, WARM_BATCH)) {
     const [key, provider, target] = entry.split('|')

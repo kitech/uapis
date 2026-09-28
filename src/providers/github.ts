@@ -73,14 +73,14 @@ export const def: ProviderDef = {
   displayName: 'GitHub',
   tier: 'A-',
   auth: {
-    settingKey: 'gh.token',
+    settingKey: 'github.token',
     label: 'GitHub fine-grained PAT（可选）',
     signupUrl: 'https://github.com/settings/personal-access-tokens',
   },
   hosts: ['api.github.com'],
   // GitHub 搜索端点是 10 次/分钟，core 是 60 次/小时，取最严的那个当闸门
   minIntervalMs: 6000,
-  uaNote: '匿名 60 次/小时（core）、10 次/分钟（search）；配 gh.token 后 5000 次/小时',
+  uaNote: '匿名 60 次/小时（core）、10 次/分钟（search）；配 github.token 后 5000 次/小时',
   parseCostMs: 0,
   attribution: '仓库与用户元数据版权归 GitHub 及各自作者',
   tos: 'https://docs.github.com/site-policy/github-terms/github-terms-of-service',
@@ -141,7 +141,7 @@ export const def: ProviderDef = {
 export const runtime: ProviderRuntime = {
   name: def.name,
   async buildPlan(env, target): Promise<UpstreamPlan> {
-    const token = await getSetting(env, 'gh.token')
+    const token = await getSetting(env, 'github.token')
     const headers: Record<string, string> = { 'X-GitHub-Api-Version': API_VERSION }
     // token 走 Authorization 头，不进 query：避免被日志和缓存键记录
     if (token.length > 0) headers.Authorization = `Bearer ${token}`

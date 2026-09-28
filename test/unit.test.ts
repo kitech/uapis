@@ -321,13 +321,13 @@ describe('P2 零 key 源回源计划', () => {
     expect(plan.headers?.['X-GitHub-Api-Version']).toBe('2022-11-28')
   })
 
-  it('github 配了 gh.token 就走 Authorization 头，不进 query', async () => {
-    await putSettings(env, { 'gh.token': 'ghp_test' })
+  it('github 配了 github.token 就走 Authorization 头，不进 query', async () => {
+    await putSettings(env, { 'github.token': 'ghp_test' })
     clearSettingsMemo()
     const plan = await gh.buildPlan(env, { op: 'user', id: 'torvalds', query: [] })
     expect(plan.headers?.Authorization).toBe('Bearer ghp_test')
     expect(plan.url).not.toContain('ghp_test')
-    await putSettings(env, { 'gh.token': '' })
+    await putSettings(env, { 'github.token': '' })
     clearSettingsMemo()
   })
 
@@ -863,7 +863,7 @@ describe('P5 包管理与文献检索源', () => {
 
   it('pubmed：空 term 与非法 PMID 必须自己拒（上游都是 200 + 错误体）', async () => {
     const rt = runtimeFor('pubmed')!
-    await putSettings(env, { 'ncbi.api_key': '' })
+    await putSettings(env, { 'pubmed.api_key': '' })
     clearSettingsMemo()
     expect(
       (await rt.buildPlan(env, { op: 'search', id: '', query: [['term', 'cloudflare AND waf']] })).url,
@@ -890,9 +890,9 @@ describe('P5 包管理与文献检索源', () => {
     ).rejects.toMatchObject({ status: 400, details: { allowed: expect.arrayContaining(['pub_date']) } })
   })
 
-  it('pubmed：配了合法 ncbi.api_key 才带上，配错当没配', async () => {
+  it('pubmed：配了合法 pubmed.api_key 才带上，配错当没配', async () => {
     const rt = runtimeFor('pubmed')!
-    await putSettings(env, { 'ncbi.api_key': 'NCBI1234567890' })
+    await putSettings(env, { 'pubmed.api_key': 'NCBI1234567890' })
     clearSettingsMemo()
     expect(
       (await rt.buildPlan(env, { op: 'search', id: '', query: [['term', 'waf']] })).url,
@@ -902,12 +902,12 @@ describe('P5 包管理与文献检索源', () => {
       (await rt.buildPlan(env, { op: 'search', id: '', query: [['term', 'waf']] })).url,
     ).toContain('eutils.ncbi.nlm.nih.gov')
 
-    await putSettings(env, { 'ncbi.api_key': 'short' })
+    await putSettings(env, { 'pubmed.api_key': 'short' })
     clearSettingsMemo()
     expect(
       (await rt.buildPlan(env, { op: 'summary', id: '', query: [['id', '1']] })).url,
     ).not.toContain('api_key')
-    await putSettings(env, { 'ncbi.api_key': '' })
+    await putSettings(env, { 'pubmed.api_key': '' })
     clearSettingsMemo()
   })
 

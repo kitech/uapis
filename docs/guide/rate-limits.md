@@ -18,7 +18,7 @@
 | `queue.soft_limit` | 队列软上限，超过后 `/status` 标记 `throttled` |
 | `quota.<provider>.<channel>` | 单 provider 单 channel 的每日额度；`proxy.zenrows` / `proxy.jina` 是付费通道额度 |
 | `crossref.mailto` | 可选，填合法邮箱即带 `mailto` 进 Crossref polite pool；填错当没配 |
-| `ncbi.api_key` | 可选，NCBI E-utilities API key（3 → 10 次/秒）；填合法值才带上，填错当没配，不进缓存键 |
+| `pubmed.api_key` | 可选，NCBI E-utilities API key（3 → 10 次/秒）；填合法值才带上，填错当没配，不进缓存键 |
 | `cache.soft_rows` | D1 缓存行软上限，超过后只允许覆盖已有行 |
 | `cache.negative_ttl` | 负缓存秒数，默认 21600（6h） |
 

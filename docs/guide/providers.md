@@ -13,7 +13,7 @@
 | B | 官方 API 但要注册 key | stackexchange |
 | C | 付费墙/非官方源，必须走付费代理通道 | economist |
 
-`github` 的四个端点都标了 `auth: 'optional'`：配了 `gh.token` 自动提额，不配也能匿名调用。
+`github` 的四个端点都标了 `auth: 'optional'`：配了 `github.token` 自动提额，不配也能匿名调用。
 `/status` 会把它报成 `active` 并给出 `auth_required=false`，不会误报成 `unconfigured`。
 
 tier C 没有单一的 `auth.settingKey`，而是 `requiredAnyOf`：ZenRows / Jina 任一可用即可。
@@ -43,7 +43,7 @@ tier C 没有单一的 `auth.settingKey`，而是 `requiredAnyOf`：ZenRows / Ji
 
 ## Stack Exchange · tier B
 
-上游：`https://api.stackexchange.com/2.3`，**需要 `se.key`**。
+上游：`https://api.stackexchange.com/2.3`，**需要 `stackexchange.api_key`**。
 
 | 方法 | 路径 | 参数 |
 | --- | --- | --- |
@@ -72,7 +72,7 @@ tier C 没有单一的 `auth.settingKey`，而是 `requiredAnyOf`：ZenRows / Ji
 | GET | `/api/v1/github/user/{login}` | 路径 `login`：`^[A-Za-z0-9-]{1,39}$` |
 
 - host：`api.github.com`
-- 匿名 60 次/小时（core）、10 次/分钟（search）；配 `gh.token` 后 5000 次/小时
+- 匿名 60 次/小时（core）、10 次/分钟（search）；配 `github.token` 后 5000 次/小时
 - 闸门取最严的 6000ms：按**匿名** search 的 10 次/分钟定的（认证后是 30 次/分钟，
   闸门更严所以无副作用），闸门是 provider 级的，宁可慢也不能撞上 10 次/分钟
 - token 走 `Authorization: Bearer` 头，不进 query，因此不会进日志和缓存键
@@ -256,7 +256,7 @@ curl "https://<你的域名>/api/v1/github/android/rising?since=2026-08-28&per_p
   esearch（查 PMID）+ esummary（取题录）都支持 `retmode=json`，纯 JSON 够用
 - `retmax` 上界 100：官方最大 10000，但一次 10000 条 esummary 体积没有实用价值，
   分页用 `retstart`
-- **可选 key**：设置 `ncbi.api_key`，填了合法值（8-64 位字母数字/`-`/`_`）才附到上游 query，
+- **可选 key**：设置 `pubmed.api_key`，填了合法值（8-64 位字母数字/`-`/`_`）才附到上游 query，
   配错当没配；它只发往 `eutils.ncbi.nlm.nih.gov`（白名单唯一出口），**不进缓存键**
 - 归属：题录（标题/作者/期刊）版权归作者与出版商，PubMed 只做索引
 
@@ -423,13 +423,13 @@ curl "https://<你的域名>/api/v1/github/android/rising?since=2026-08-28&per_p
 curl -X PUT https://<你的域名>/admin/settings \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"se.key":"YOUR_KEY","gh.token":"YOUR_TOKEN"}'
+  -d '{"stackexchange.api_key":"YOUR_KEY","github.token":"YOUR_TOKEN"}'
 ```
 
 设置在隔离实例内记忆化 30 秒，`PUT` 之后立刻生效。
 
-只有 `se.key` 是必需的（不配就是 `503 PROVIDER_UNCONFIGURED`）。
-`gh.token` 配不配都能跑：配了走 `Authorization: Bearer`，不配就匿名。
+只有 `stackexchange.api_key` 是必需的（不配就是 `503 PROVIDER_UNCONFIGURED`）。
+`github.token` 配不配都能跑：配了走 `Authorization: Bearer`，不配就匿名。
 `zenrows.key` / `jina.key` 任一即可让 tier C 源可用，两个都不配时该源报 `unconfigured`。
 `crossref.mailto` 是可选的礼貌设置（进 polite pool），不填也能用。
 `reddit.*`、`youtube.key`、`ph.key`、`lastfm.key`、`telegram.token` 这些预留给后续阶段的 key

@@ -62,7 +62,7 @@ Stack Exchange 是 tier B，未配置 key 时返回 `503 PROVIDER_UNCONFIGURED`�
 curl -X PUT http://localhost:8787/admin/settings \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"se.key":"YOUR_KEY"}'
+  -d '{"stackexchange.api_key":"YOUR_KEY"}'
 ```
 
 拿 key：<https://stackapps.com/apps/oauth/register>（本项目只用到免登录的 2.3 API key 部分）。
@@ -75,18 +75,12 @@ npm test                 # 232 个离线测试，不发真实请求
 npm run deploy:dry       # 构建文档 + dry-run，检查产物 < 64MiB
 ```
 
-部署顺序：
-
-1. 把 `wrangler.jsonc` 里的 `database_id` 换成真实 D1 ID，跑 `npm run db:migrate`。
-2. `npx wrangler secret put ADMIN_TOKEN`。
-3. `npm run deploy`。
-4. 绑定自定义域名后，把 `vars.SITE_URL` 改成该域名再部署一次
-   （`SITE_URL` 决定 UA 尾串与 CORS 白名单，必须与真实域名一致）。
-5. 冒烟：`curl -i https://<域名>/api/v1/hackernews/search?q=cloudflare` 连打两次，
-   第二次必须带 `X-Cache: HIT`。
+要发布到线上看 **[部署上线](/guide/deployment)**：建 D1、建队列、迁移、部署、设
+`ADMIN_TOKEN`、绑域名，以及回滚 / Time Travel / 只读模式 / 额度监控这些日常运维。
 
 ## 6. 下一步
 
 - [数据源与凭据](/guide/providers)：每个 provider 的凭据、上游条款与限流
+- [部署上线](/guide/deployment)：把自己的实例发出去，以及上线后的运维
 - [限流与免费额度](/guide/rate-limits)：三层限速是怎么配合的
 - [错误与排障](/guide/errors)：错误码表与常见问题

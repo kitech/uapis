@@ -8,6 +8,8 @@ import { handleQueueBatch } from '../src/core/queue'
 import { consumeCredits, readCredits, resetCredits } from '../src/core/credits'
 import { cacheKeyFor } from '../src/core/refresh'
 import { encodeTarget } from '../src/core/target'
+import { readStats } from '../src/core/stats'
+import { resetRowCountCache, t1Delete } from '../src/core/cache'
 import { network } from './server'
 
 /** miniflare 的 Cloudflare.Env 缺少 src/types.ts 里声明的 ADMIN_TOKEN，测试里做一次桥接 */
@@ -593,17 +595,17 @@ describe('参数校验', () => {
 })
 
 describe('凭据与队列降级', () => {
-  it('未配置 se.key 时返回 PROVIDER_UNCONFIGURED', async () => {
+  it('未配置 stackexchange.api_key 时返回 PROVIDER_UNCONFIGURED', async () => {
     const res = await call('/api/v1/stackexchange/question/123')
     expect(res.status).toBe(503)
     const body = (await res.json()) as { code: string; details: { setting: string } }
     expect(body.code).toBe('PROVIDER_UNCONFIGURED')
-    expect(body.details.setting).toBe('se.key')
+    expect(body.details.setting).toBe('stackexchange.api_key')
     expect(seQuestions.calls).toBe(0)
   })
 
-  it('配置 se.key 后透传上游，并带上 key 与 site', async () => {
-    await putSettings(env, { 'se.key': 'TESTKEY' })
+  it('配置 stackexchange.api_key 后透传上游，并带上 key 与 site', async () => {
+    await putSettings(env, { 'stackexchange.api_key': 'TESTKEY' })
     clearSettingsMemo()
 
     const res = await call('/api/v1/stackexchange/question/123?site=stackoverflow')
@@ -612,7 +614,7 @@ describe('凭据与队列降级', () => {
     expect(seQuestions.urls[0]).toContain('key=TESTKEY')
     expect(seQuestions.urls[0]).toContain('site=stackoverflow')
 
-    await putSettings(env, { 'se.key': '' })
+    await putSettings(env, { 'stackexchange.api_key': '' })
     clearSettingsMemo()
   })
 
@@ -671,14 +673,14 @@ describe('P1 端点', () => {
   })
 
   it('配了 key 之后 answers 带上分页参数', async () => {
-    await putSettings(env, { 'se.key': 'TESTKEY' })
+    await putSettings(env, { 'stackexchange.api_key': 'TESTKEY' })
     clearSettingsMemo()
     const res = await call('/api/v1/stackexchange/question/123/answers?pagesize=50&page=1&sort=votes')
     expect(res.status).toBe(200)
     expect(seQuestions.urls.at(-1)).toContain('/questions/123/answers')
     expect(seQuestions.urls.at(-1)).toContain('pagesize=50&page=1')
     expect(seQuestions.urls.at(-1)).toContain('sort=votes')
-    await putSettings(env, { 'se.key': '' })
+    await putSettings(env, { 'stackexchange.api_key': '' })
     clearSettingsMemo()
   })
 
@@ -696,7 +698,7 @@ describe('P2 零 key 源', () => {
     expect(gh.urls.at(-1)).toBe('https://api.github.com/repos/cloudflare/workers-sdk')
   })
 
-  it('github 匿名可用：不配 gh.token 也 200', async () => {
+  it('github 匿名可用：不配 github.token 也 200', async () => {
     const res = await call('/api/v1/github/search/repositories?q=workers&sort=stars')
     expect(res.status).toBe(200)
     expect(res.headers.get('x-cache')).toBe('REFRESH')
@@ -1191,8 +1193,8 @@ describe('P5 包管理与文献检索源', () => {
     expect(eutils.urls.length).toBe(before)
   })
 
-  it('pubmed：配了 ncbi.api_key 才往上游带，且只在 eutils 出口', async () => {
-    await putSettings(env, { 'ncbi.api_key': 'NCBI1234567890' })
+  it('pubmed：配了 pubmed.api_key 才往上游带，且只在 eutils 出口', async () => {
+    await putSettings(env, { 'pubmed.api_key': 'NCBI1234567890' })
     clearSettingsMemo()
     const res = await call('/api/v1/pubmed/search?term=keyed')
     expect(res.status).toBe(200)
@@ -1202,12 +1204,12 @@ describe('P5 包管理与文献检索源', () => {
     // key 不进缓存键：换个 term 不该因为配了 key 就换维度
     expect(url.searchParams.get('term')).toBe('keyed')
 
-    await putSettings(env, { 'ncbi.api_key': 'bad' })
+    await putSettings(env, { 'pubmed.api_key': 'bad' })
     clearSettingsMemo()
     const unkeyed = await call('/api/v1/pubmed/search?term=unkeyed')
     expect(unkeyed.status).toBe(200)
     expect(new URL(eutils.urls.at(-1)!).searchParams.get('api_key')).toBeNull()
-    await putSettings(env, { 'ncbi.api_key': '' })
+    await putSettings(env, { 'pubmed.api_key': '' })
     clearSettingsMemo()
   })
 
@@ -2043,6 +2045,213 @@ describe('请求头与 CORS', () => {
     expect(res.headers.get('ratelimit-policy')).toMatch(/^\d+;w=1$/)
     expect(res.headers.get('x-ratelimit-limit')).toBe('60')
     expect(res.headers.get('ratelimit')).toMatch(/^r=\d+;t=\d+$/)
+  })
+})
+
+describe('只读模式（maintenance.mode=readonly）', () => {
+  async function setMode(mode: 'active' | 'readonly'): Promise<void> {
+    await putSettings(env, { 'maintenance.mode': mode })
+    clearSettingsMemo()
+  }
+
+  /**
+   * 造一条 STALE / 超 stale 窗口的 hackernews search 缓存。
+   * 先真实请求一次把缓存填上，再直接改时间戳——比手搓 target 可靠，
+   * 缓存键的 query 归一化规则不必在测试里复述一遍。
+   * 填充必须在 active 下做：readonly 时回源被挡，压根写不进缓存。
+   */
+  async function seedSearchRows(age: 'stale' | 'expired'): Promise<void> {
+    await setMode('active')
+    const now = Date.now()
+    await call('/api/v1/hackernews/search?q=ro-seed')
+    const expiresAt = age === 'stale' ? now - 1_000 : now - 120_000
+    const staleUntil = age === 'stale' ? now + 60_000 : now - 60_000
+    await env.DB.prepare(
+      `UPDATE cache SET expires_at = ?, stale_until = ? WHERE provider = ? AND resource = ?`,
+    )
+      .bind(expiresAt, staleUntil, 'hackernews', 'search')
+      .run()
+    const rows = await env.DB.prepare(
+      `SELECT k FROM cache WHERE provider = ? AND resource = ?`,
+    )
+      .bind('hackernews', 'search')
+      .all<{ k: string }>()
+    for (const row of rows.results) {
+      await t1Delete(row.k)
+    }
+    await setMode('readonly')
+  }
+
+  beforeEach(async () => {
+    // 关掉 T1：T1 里那条新鲜条目会盖掉我们改出来的 STALE 状态
+    await putSettings(env, { 'cache.t1': 'off' })
+    await setMode('readonly')
+  })
+
+  afterEach(async () => {
+    await env.DB.prepare('DELETE FROM cache').run()
+    await env.DB.prepare('DELETE FROM quota').run()
+    await env.DB.prepare('DELETE FROM stats').run()
+    await putSettings(env, { 'maintenance.mode': 'active' })
+    await putSettings(env, { 'cache.t1': 'on' })
+    await putSettings(env, { 'warm.list': '' })
+    clearSettingsMemo()
+    resetRowCountCache()
+  })
+
+  /**
+   * 入队次数探针。
+   *
+   * 不能断言上游被调了几次来证明"没有回源"：STALE 路径走的是 waitUntil 入队，
+   * 而 miniflare 不会真的派发队列消息，旧代码照样会入队、却一次上游都不打，
+   * 断言 hnSearch.calls 恒为 0 会漏掉这个 bug。
+   * enqueueRefresh 每次都先 consumeQueueSlot 扣 `__queue__/__system__` 那一行，
+   * 直接读它才是"到底入队没有"的准确信号。
+   */
+  /**
+   * 走真实的 scheduled 入口，顺带覆盖 CRON_WARM 分发。
+   * executionCtx 用普通对象：exports.default 会把实参结构化克隆进 worker，
+   * 真正的 ExecutionContext 克隆不了。exports.default 的类型只声明了 fetch，
+   * scheduled 得自己断言出来。
+   */
+  async function runCron(cron: string): Promise<void> {
+    const pending: Promise<unknown>[] = []
+    const worker = exports.default as unknown as {
+      scheduled: (
+        controller: ScheduledController,
+        e: Env,
+        ctx: ExecutionContext,
+      ) => Promise<void>
+    }
+    const controller = { cron, scheduledTime: Date.now(), noRetry: () => undefined }
+    await worker.scheduled(
+      controller as unknown as ScheduledController,
+      env,
+      { waitUntil: (p: Promise<unknown>) => pending.push(p), passThroughOnException: () => undefined } as unknown as ExecutionContext,
+    )
+    await Promise.all(pending)
+  }
+
+  /** 等 waitUntil 里的异步收尾（入队扣额、刷新写库）落定 */
+  async function settle(): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, 200))
+  }
+
+  async function queueSlots(): Promise<number> {
+    const row = await env.DB.prepare(
+      `SELECT used FROM quota WHERE provider = ? AND channel = ?`,
+    )
+      .bind('__queue__', '__system__')
+      .first<{ used: number }>()
+    return row?.used ?? 0
+  }
+
+  it('STALE 缓存照常返回 200，但不再入队回源', async () => {
+    await seedSearchRows('stale')
+    const before = await queueSlots()
+
+    const res = await call('/api/v1/hackernews/search?q=ro-seed')
+    expect(res.status).toBe(200)
+    expect(res.headers.get('x-cache')).toBe('STALE')
+    // 入队挂在 waitUntil 上，响应返回时那笔 D1 写还没落；给它跑完再读
+    await settle()
+    // 修复前这里会 +1：STALE 分支无条件 waitUntil(refreshInBackground)
+    expect(await queueSlots()).toBe(before)
+  })
+
+  it('超出 stale 窗口的旧值返回 STALE-FALLBACK，不回源也不写库', async () => {
+    await seedSearchRows('expired')
+    const before = hnSearch.calls
+    const row = await env.DB.prepare(
+      `SELECT fetched_at FROM cache WHERE provider = ? AND resource = ?`,
+    )
+      .bind('hackernews', 'search')
+      .first<{ fetched_at: number }>()
+
+    const res = await call('/api/v1/hackernews/search?q=ro-seed')
+    expect(res.status).toBe(200)
+    expect(res.headers.get('x-cache')).toBe('STALE-FALLBACK')
+    expect(hnSearch.calls).toBe(before)
+
+    // inline 开启时旧代码会同步回源并覆盖这行；时间戳没动说明没写
+    const after = await env.DB.prepare(
+      `SELECT fetched_at FROM cache WHERE provider = ? AND resource = ?`,
+    )
+      .bind('hackernews', 'search')
+      .first<{ fetched_at: number }>()
+    expect(after?.fetched_at).toBe(row?.fetched_at)
+  })
+
+  it('完全无缓存时 503 且带出模式名', async () => {
+    const res = await call('/api/v1/hackernews/search?q=ro-empty')
+    expect(res.status).toBe(503)
+    const body = (await res.json()) as { code: string; details?: { mode?: string } }
+    expect(body.code).toBe('SERVICE_UNAVAILABLE')
+    expect(body.details?.mode).toBe('readonly')
+    expect(hnSearch.calls).toBe(0)
+  })
+
+  it('HIT 缓存不受影响', async () => {
+    await setMode('active')
+    const first = await call('/api/v1/hackernews/search?q=ro-hit')
+    expect(first.status).toBe(200)
+    await setMode('readonly')
+    const before = hnSearch.calls
+
+    const second = await call('/api/v1/hackernews/search?q=ro-hit')
+    expect(second.status).toBe(200)
+    expect(second.headers.get('x-cache')).toBe('HIT')
+    expect(hnSearch.calls).toBe(before)
+  })
+
+  it('运维通道不被误伤：/admin/rebuild 仍可入队', async () => {
+    const res = await call('/admin/rebuild', {
+      method: 'POST',
+      headers: { ...ADMIN, 'content-type': 'application/json' },
+      body: JSON.stringify({ provider: 'hackernews', op: 'item', id: 'ro-admin' }),
+    })
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as { queued: boolean }).queued).toBe(true)
+  })
+
+  it('cron 预热在只读模式下不入队', async () => {
+    const warmList = 'v1:hackernews:item:99:q|hackernews|item:99'
+    await putSettings(env, { 'warm.list': warmList })
+    clearSettingsMemo()
+    const before = await queueSlots()
+
+    await runCron('*/30 * * * *')
+    await settle()
+
+    // 修复前这里会 +1：warm() 没有查维护模式，照样把预热项丢进队列
+    expect(await queueSlots()).toBe(before)
+    const stats = await readStats(env)
+    expect(stats.find((s) => s.path === '__warm_queued')?.n).toBeUndefined()
+  })
+
+  it('cron 预热在 active 模式下正常入队', async () => {
+    await setMode('active')
+    await putSettings(env, { 'warm.list': 'v1:hackernews:item:99:q|hackernews|item:99' })
+    clearSettingsMemo()
+    const before = await queueSlots()
+
+    await runCron('*/30 * * * *')
+    await settle()
+
+    expect(await queueSlots()).toBe(before + 1)
+  })
+
+  it('切回 active 后 STALE 重新触发刷新', async () => {
+    await seedSearchRows('stale')
+    await setMode('active')
+    const before = hnSearch.calls
+
+    const res = await call('/api/v1/hackernews/search?q=ro-seed')
+    expect(res.status).toBe(200)
+    expect(res.headers.get('x-cache')).toBe('STALE')
+    // waitUntil 里的刷新是异步的，队列消费完才会打上游
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    expect(hnSearch.calls).toBeGreaterThan(before)
   })
 })
 

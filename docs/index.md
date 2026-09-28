@@ -35,13 +35,25 @@ hero:
 | provider | 端点 | 凭据 |
 | --- | --- | --- |
 | hackernews | `search`、`item/{id}`、`user/{id}`、`front`、`latest`、`user/{id}/posts` | 无 |
-| stackexchange | `question/{id}`、`search`、`user/{id}`、`tags`、`question/{id}/answers`、`question/{id}/comments`、`sites` | `se.key`（`sites` 除外） |
-| github | `repo/{owner}/{repo}`、`search/repositories`、`user/{login}` | 无（`gh.token` 可选） |
+| stackexchange | `question/{id}`、`search`、`user/{id}`、`tags`、`question/{id}/answers`、`question/{id}/comments`、`sites` | `stackexchange.api_key`（`sites` 除外） |
+| github | `repo/{owner}/{repo}`、`search/repositories`、`android/rising`、`user/{login}` | 无（`github.token` 可选） |
 | devto | `articles`、`article/{id}`、`user/{username}` | 无 |
 | arxiv | `search`、`paper/{id}` | 无 |
 | economist | `article/{slug}` | `zenrows.key` 或 `jina.key`（付费通道，任一即可） |
+| lobsters | `hot`、`newest`、`story/{id}`、`tag/{tag}` | 无 |
+| itunes | `search`、`lookup` | 无 |
+| crossref | `search`、`work/{doi}` | 无 |
+| pypi | `project/{package}`、`release/{package}/{version}` | 无 |
+| npm | `search`、`latest/{name}`、`version/{name}/{version}` | 无 |
+| pubmed | `search`、`summary` | 无（`pubmed.api_key` 可选） |
+| usgs | `earthquakes`、`earthquakes/{id}` | 无 |
+| gitlab | `projects`、`project/{id}`、`commits` | 无 |
+| crates | `search`、`crate/{name}`、`crate/{name}/{version}` | 无 |
+| musicbrainz | `search`、`artist/{mbid}`、`release/{mbid}`、`release-group/{mbid}` | 无 |
+| openmeteo | `current`、`hourly`、`geocode`、`air-quality` | 无 |
 
-完整参数见 [数据源与凭据](/guide/providers) 或 `/openapi.json`。
+17 个数据源 / 54 个端点里，**只有 Stack Exchange 的 6 个端点必须配 key**（`/sites` 除外），
+其余全是零 key 源。完整参数见 [数据源与凭据](/guide/providers) 或 `/openapi.json`。
 
 ## 快速预览
 

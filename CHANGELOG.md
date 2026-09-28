@@ -82,7 +82,7 @@ P0 骨架 + P1 端点完善 + P2 零 key 源批量接入 + P3 付费代理通道
     **不做 packument**（abbreviated `react` 2.9MB、`@types/node` 2.3MB，超 512KB 上限）
   - `pubmed`（tier A-）：`search`（esearch）、`summary`（esummary `version=2.0`），均透传；
     空 `term` 与非法 PMID 上游都返回 **200 + 错误体**，一律在回源前 400；
-    可选 `ncbi.api_key`（3 → 10 次/秒，填错当没配，不进缓存键）；不做 efetch XML
+    可选 `pubmed.api_key`（3 → 10 次/秒，填错当没配，不进缓存键）；不做 efetch XML
 - P6 新增 provider（全部零 key，接入前逐个 curl 实测过可达性、体积与错误形态）：
   - `usgs`（tier A，公有领域）：`earthquakes`（FDSN `/query`）、`earthquakes/{id}`，均透传 GeoJSON；
     **不用 `feed/v1.0/summary/*.geojson`**（all_hour 4.6KB → all_month 7.5MB，
@@ -143,11 +143,47 @@ P0 骨架 + P1 端点完善 + P2 零 key 源批量接入 + P3 付费代理通道
 - XDA（`xdaforums.com`）热榜**确认不接入**，证据链存入 `provider-audit.md`：
   Valnet ToS §7/§5/§3/§15 四层条款（§7 认可 RSS、§15 禁爬且明文含 User Submissions）、
   XenForo 内核无 hot 排序、域已迁 BunnyCDN、四个同类项目先例（含一个公开选择"不爬"的连接器）
+- 新增 [部署上线](docs/guide/deployment.md) 文档：自架 8 步（建 D1 / 建队列 / 迁移 / 部署 /
+  设 secret / 绑域名 / 配凭据 / 冒烟清单）+ 运维手册（回滚范围、Time Travel、只读模式、
+  额度监控、Cron 语义、部署失败速查）。README 与 quickstart 的部署段改为链接，不再三处维护
+- **`db:migrate` / `db:migrate:local` / `db:seed:local` 改用 binding `DB` 引用 D1**
+  （`wrangler d1 migrations apply DB`）而不是库名 `uapis`——wrangler 的 `<database>`
+  位置参数本来就同时接受 name 和 binding，改 `database_name` 或换 `database_id` 不用动脚本
+- 修正文档漂移：`errors.md` 的上游体积上限 2MB → **512KB**（对齐 `MAX_UPSTREAM_BYTES`）、
+  闸门"当前 300ms" → **200–6000ms 分档**；`index.md` 的 provider 表补全到 17 个
+  （此前只有 6 个，github 缺 `android/rising`）；README 路线从 P5 更新到 P10
+- 文档口径按官方文档校准：Free 计划可建 10 个 D1 库（不是 1 个）、Queues 消息保留
+  **24 小时**（不是 4 天）、**D1 免费额度触顶是硬失败**（查询报错直到 UTC 日切，
+  不是计费超支）、Workers 请求触顶返回 **Error 1027**
 - 离线测试：`vitest-pool-workers` + `@msw/cloudflare` 出站拦截，232 个用例全离线
 - VitePress 文档站（首页/快速上手/数据源/限流/错误/合规 + 参考页），部署到同一 Worker 的 `/docs`
 
 ### Fixed
 
+- **凭据设置键统一成「provider 名 + 凭证类型」**：`se.key` → `stackexchange.api_key`、
+  `ncbi.api_key` → `pubmed.api_key`、`gh.token` → `github.token`。原先三个键里两个用缩写
+  （`se`/`gh`），第三个 `ncbi` 更是按**上游机构**命名，而全项目其余设置键（`crossref.*`、
+  `zenrows.key`、`quota.*` 等）一律按 provider 名——同一个 settings 表里混着两套命名依据。
+  改完前缀与 `/api/v1/<provider>/` 的路径段一致，凭据从 URL 就能推出来该配哪个键。
+  后缀保留各上游官方叫法：SE 与 NCBI 官方称 API key，GitHub 官方称 token（fine-grained PAT）。
+  0.1.0 尚未发布过（无 tag、未部署），因此直接改名、不写兼容层与数据迁移
+- **`maintenance.mode=readonly` 之前挡不住自动回源**：维护模式判断被套在
+  `if (fallback === null)` 里面，于是"缓存里有旧值"的几条路径全都绕过了它。
+  具体表现是 stale 命中仍然无条件 `waitUntil(refreshInBackground)` 入队（`refreshInBackground`
+  直接调 `enqueueRefresh`，不查维护模式），照常扣队列额度并异步回源；超出 stale 窗口的旧值
+  在开启内联回源时更是直接同步打上游再写库。根因是判断位置，不是判断本身。
+  现在 stale 分支与 `fallback !== null` 都各自查一次维护模式：
+  `STALE` 照常返回但不再入队，超窗口的旧值返回 `STALE-FALLBACK`（旧值本来只在回源失败时
+  兜底，只读模式下没有回源可言，返回它比 503 更有用），完全无缓存才 `503`。
+  `HIT`/`NEGATIVE` 与 `active` 下的行为一行未动
+- **cron 预热在只读模式下照样入队**：`warm()` 不查维护模式，每 30 分钟仍会把 `warm.list`
+  里的条目丢进队列烧额度。现在非 `active` 时按 `warm.list` 长度记进 `__warm_skipped` 后返回
+- 两处只读例外是有意保留的：`POST /admin/rebuild` 仍可入队（只读冻结的是自动流量，
+  人工显式重建是排障手段）；切换瞬间已在队列里的消息仍会回源一次（消费者不查维护模式，
+  `max_batch_size: 1`，窗口极短）
+- `maintenance.mode` 原先没有任何行为测试。现补 8 个：stale 不入队、超窗口回 `STALE-FALLBACK`
+  且不写库、无缓存 503 带 `details.mode`、HIT 不受影响、`/admin/rebuild` 不被误伤、
+  cron 在 readonly 下不入队 / active 下正常入队、切回 active 后 stale 重新触发刷新
 - **上游正文读失败不再冒成 500**：状态行到了但正文断流时，`await response.text()` 抛出的
   `TimeoutError` 会一路冒到 `onError` 变成 `500 INTERNAL_ERROR`，而且**不写负缓存**——
   同一个 key 每次都白等一个超时。P5 接 pypi / npm 时在 Fastly 前置的 CDN 上撞到
