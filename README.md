@@ -38,7 +38,7 @@ npm run dev                         # wrangler dev
 
 ```bash
 npm run typecheck
-npm test                            # vitest-pool-workers + MSW 出站拦截，全离线（232 个用例）
+npm test                            # vitest-pool-workers + MSW 出站拦截，全离线（240 个用例）
 npm run deploy:dry                  # 构建文档并 dry-run，产物需 < 64MiB
 ```
 
@@ -58,9 +58,11 @@ npm run deploy:dry                  # 构建文档并 dry-run，产物需 < 64Mi
 ## 部署
 
 完整步骤见 **[docs/guide/deployment.md](docs/guide/deployment.md)**，最小顺序是：
-建 D1（`npx wrangler d1 create uapis` → 把 `database_id` 填进 `wrangler.jsonc`）→
-建队列（`npx wrangler queues create uapis-refresh`，**不能跳**）→ `npm run db:migrate` →
-`npm run deploy`（别裸跑 `wrangler deploy`，会丢 `/docs/`）→ `npx wrangler secret put ADMIN_TOKEN`
+建队列（`npx wrangler queues create uapis-refresh`，**不能跳，队列不会自动开通**）→
+`npm run deploy`（D1 库在这一步自动开出来，所以迁移要排在它后面；
+别裸跑 `wrangler deploy`：`.assets/` 是 gitignore 的构建产物，缺失时 wrangler 会直接
+报错终止整个部署；用 Workers Builds 自动部署时 Build command 要填 `npm run build:docs`）→
+`npm run db:migrate`（建 5 张表）→ `npx wrangler secret put ADMIN_TOKEN`
 → 绑自定义域名后改 `vars.SITE_URL` 再部署一次。
 
 日常运维（回滚范围、Time Travel、只读模式、额度监控、部署失败速查）也在同一页。

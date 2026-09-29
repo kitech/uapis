@@ -17,8 +17,8 @@
     {
       "binding": "DB",
       "database_name": "uapis",
-      "database_id": "00000000000000000000000000000000",
-      "migrations_dir": "migrations"
+      "migrations_dir": "migrations",
+      "migrations_pattern": "migrations/[0-9]*.sql"
     }
   ],
   "queues": {

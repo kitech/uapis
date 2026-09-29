@@ -2137,6 +2137,22 @@ describe('只读模式（maintenance.mode=readonly）', () => {
     await new Promise((resolve) => setTimeout(resolve, 200))
   }
 
+  /**
+   * 轮询直到条件成立。固定 sleep 在机器繁忙时会偶发超时（CI 上尤其明显），
+   * 所以凡是断言异步副作用的地方都该用它，而不是等一个拍脑袋的毫秒数。
+   */
+  async function waitFor(
+    predicate: () => boolean | Promise<boolean>,
+    timeoutMs = 5000,
+  ): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs
+    for (;;) {
+      if (await predicate()) return true
+      if (Date.now() >= deadline) return false
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+  }
+
   async function queueSlots(): Promise<number> {
     const row = await env.DB.prepare(
       `SELECT used FROM quota WHERE provider = ? AND channel = ?`,
@@ -2250,8 +2266,8 @@ describe('只读模式（maintenance.mode=readonly）', () => {
     expect(res.status).toBe(200)
     expect(res.headers.get('x-cache')).toBe('STALE')
     // waitUntil 里的刷新是异步的，队列消费完才会打上游
-    await new Promise((resolve) => setTimeout(resolve, 200))
-    expect(hnSearch.calls).toBeGreaterThan(before)
+    const refreshed = await waitFor(() => hnSearch.calls > before)
+    expect(refreshed, 'STALE 后台刷新未在 5s 内打到上游').toBe(true)
   })
 })
 

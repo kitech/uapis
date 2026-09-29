@@ -16,8 +16,8 @@
 ```bash
 npm install
 npm run typecheck     # tsc --noEmit
-npm test              # 232 个离线用例，不发真实请求
-npm run deploy:dry    # 构建文档 + dry-run，产物 245.22 KiB / gzip 57.33 KiB
+npm test              # 240 个离线用例，不发真实请求
+npm run deploy:dry    # 构建文档 + dry-run，产物约 245 KiB（gzip 约 57 KiB，58 个文件）
 ```
 
 Worker 体积上限 64 MiB，本项目 gzip 后 57 KiB，余量充足。
@@ -25,30 +25,44 @@ Worker 体积上限 64 MiB，本项目 gzip 后 57 KiB，余量充足。
 
 ## 第一部分 · 首次部署自己的实例
 
-### 步骤 1 · 建 D1 数据库
+### 步骤 1 · D1 由首次部署自动开通
 
-```bash
-npx wrangler d1 create uapis --location apac
-```
-
-回显里的 `database_uuid` 填进 `wrangler.jsonc`：
+`wrangler.jsonc` 里**故意不写 `database_id`**：
 
 ```jsonc
 "d1_databases": [
   {
     "binding": "DB",
     "database_name": "uapis",
-    "database_id": "把这里换成刚拿到的 UUID",   // 仓库里是 32 个 0 的占位符
-    "migrations_dir": "migrations"
+    "migrations_dir": "migrations",
+    "migrations_pattern": "migrations/[0-9]*.sql"
   }
 ]
 ```
 
-> **占位符不会触发自动建库。** wrangler 的自动资源开通（auto-provisioning）只在
-> `database_id` 这个键**整个缺失**时才生效；32 个 0 是非空字符串，会被当成合法 UUID
-> 直接送去 API，然后报 `Couldn't find a D1 DB named 'uapis'`。必须手填。
+wrangler ≥4.45 的**自动资源开通**（automatic resource provisioning）看到「有 `database_name`
+但没有 ID」就会在首次 `wrangler deploy` 时调 API 把库建出来，所以这步不需要手工操作。
 
-`--location` 只是主位置提示，Free 计划单库上限 500 MB、每账号最多 10 个库，够用。
+> **别拿占位符代替缺失。** 自动开通只在 `database_id` 这个键**整个不存在**时触发。
+> 曾经这里写的是 32 个 0，而 wrangler 判定「有没有 UUID」的实现是
+> `!!db?.uuid`（`cli.js` 的 `hasUuid`）——非空字符串就算有。于是 32 个 0 会**短路掉**
+> 自动开通分支，被当成一个合法但存在的 ID 直接送去 API，然后报
+> `D1 binding 'DB' references database '000…' which was not found. [code: 10181]`。
+> 要么留空，要么删掉整个键，别填垃圾值。
+
+**Workers Builds 不会把生成的 ID 写回仓库。** Cloudflare 官方文档原话：这种「从面板/GitHub
+发起的部署」资源会被创建，但「ID 只能从 dashboard 看到，不会写回你的仓库」。
+
+想改成手工管库也可以（也就是老做法）：
+
+```bash
+npx wrangler d1 create uapis --location apac
+```
+
+然后把回显的 `database_uuid` 填进 `wrangler.jsonc` 的 `database_id` 并提交。`--location` 只是
+主位置提示，Free 计划单库上限 500 MB、每账号最多 10 个库，够用。
+
+两种方式二选一，**不要混**：填了 `database_id` 就走「按 ID 寻址」，不填就走「按名字查」。
 
 ### 步骤 2 · 建队列
 
@@ -56,14 +70,23 @@ npx wrangler d1 create uapis --location apac
 npx wrangler queues create uapis-refresh
 ```
 
-**这步不能跳。** `wrangler.jsonc` 同时声明了 producer 和 consumer 绑定，
+**这步不能跳，队列不会自动开通。** `wrangler.jsonc` 同时声明了 producer 和 consumer 绑定，
 wrangler 部署前会校验队列存在，否则直接失败并原话提示：
 
 ```text
 Queue "uapis-refresh" does not exist. To create it, run: wrangler queues create uapis-refresh
 ```
 
+D1 能自动开通、队列不能，原因是配置里**写了队列的具名**（`"queue": "uapis-refresh"`）。
+自动开通的命名规则是 `<worker 名>-<binding 名>`，没具名的话会生成一个叫 `uapis-REFRESH`
+的队列——和这里要用的 `uapis-refresh` 是两个东西，绑定照样对不上。
+
 ### 步骤 3 · 迁移表结构
+
+> **顺序上这步必须排在首次部署之后**（不写 `database_id` 时）。
+> 库是 `wrangler deploy` 顺带建出来的，库不存在，这步就无从下手。
+> 完整顺序：建队列 → `npm run deploy` → **回到这步** → 配 `ADMIN_TOKEN`。
+> 走手工建库路径（步骤 1 的备选）则不受此限，可以维持「先迁移后部署」。
 
 ```bash
 npm run db:migrate
@@ -75,12 +98,44 @@ npm run db:migrate
 wrangler 的 `<database>` 位置参数同时接受两者。这样改 `database_name` 或换
 `database_id` 都不用动脚本；而真要改 binding，`env.DB` 的类型和 `typecheck` 会先拦下来。
 
-首次部署时先迁移再部署：此时还没有流量，不存在迁移窗口问题。
-后续 schema 变更走**加法式**（加列、加表）先行；破坏性变更放部署之后并立刻验证——
-`wrangler d1 migrations apply` 自己就会提示"迁移期间数据库可能短暂不可用"。
+> 顺带一提，官方文档其实**建议迁移用库名而非 binding**，理由是
+> 「binding 名可能会改，而库名不会」（D1 不支持重命名，想改只能导数据重建）。
+> 本项目两者目前都叫 `uapis`/`DB` 且不会动，暂时用 binding 没问题；
+> 将来要分 staging 环境、binding 改名时记得换成 `wrangler d1 migrations apply uapis`。
 
-生产**不要**跑 seed。`migrations/seed.sql` 只对本地有效（`npm run db:seed:local`），
-凭据一律走 `PUT /admin/settings`。
+> **如果这里报 `missing a database_id`**（cloudflare/workers-sdk#13632 记录的现象：
+> 靠名字反查 UUID 在部分流程下没兜住），别纠结——按步骤 1 的手工路径
+> `npx wrangler d1 create uapis` 拿到 UUID、填进 `wrangler.jsonc`、提交，
+> 就回到确定的「按 ID 寻址」路径了。
+
+**seed 不会跟着迁移跑。** `migrations/seed.sql` 和真正的迁移同住一个目录，而
+`migrations apply` 的默认发现规则是 `migrations/*.sql`——那会把 seed 一起当成一次迁移
+应用到生产。而 seed 是 `INSERT OR REPLACE`，重跑一次就会把 `maintenance.mode` 覆盖回
+`active`、把 `cors.origins` 覆盖回 `*`，正是 readonly 想避免的事。
+
+所以 `wrangler.jsonc` 里配了 `migrations_pattern: "migrations/[0-9]*.sql"`：
+只认 `0001_init.sql` 这种编号文件，`seed.sql` 不匹配。生产因此只建表、不写设置，
+全部回落到 `src/core/settings.ts` 的代码默认值——这本来就是设计意图。
+需要本地数据时手工跑 `npm run db:seed:local`，凭据一律走 `PUT /admin/settings`。
+
+迁移的通用纪律与库怎么建无关：后续 schema 变更走**加法式**（加列、加表）先行；
+破坏性变更放部署之后并立刻验证——`wrangler d1 migrations apply` 自己就会提示
+"迁移期间数据库可能短暂不可用"。
+
+### 步骤 3b · 选填：写死 account_id
+
+`wrangler.jsonc` 默认不带 `account_id`，本地命令会问你用哪个账号。Workers Builds 由
+Cloudflare 注入，不用管。只有名下有多个账号、且想免掉每次选择时才加：
+
+```jsonc
+"account_id": "ac7da44d2ead53aabeb00ef8b6c56a04"
+```
+
+### 步骤 3c · 选填：preview_database_id
+
+没配 `preview_database_id` 时，`wrangler dev --remote` 会直接用生产库。
+本项目不需要它（`npm run dev` 走本地模式），但如果哪天要加 `--remote`，
+先补上这个字段，否则一次本地调试就能改到生产数据。
 
 ### 步骤 4 · 部署
 
@@ -88,9 +143,37 @@ wrangler 的 `<database>` 位置参数同时接受两者。这样改 `database_n
 npm run deploy
 ```
 
-**不要裸跑 `wrangler deploy`。** `.assets/` 已被 gitignore，由 `npm run build:docs`
-生成并经 `scripts/stage-docs.mjs` 暂存。裸部署会丢掉整个 `/docs/` 站点，
-而且不会报错——静态资源请求免费不限量，缺了目录就是 404 而已。
+**首次部署时，这一步同时把 D1 库开出来**（见步骤 1）。所以如果走的是自动开通路线，
+第 3 步的迁移要等这一步做完才能做。
+
+**不要裸跑 `wrangler deploy`。** `wrangler.jsonc` 里 `assets.directory` 指向 `.assets`，
+而该目录已被 gitignore（`.gitignore` 第 3 行）——它是构建产物，由 `npm run build:docs`
+里的 `vitepress build docs && node scripts/stage-docs.mjs` 生成。
+
+所以干净 checkout 里没有 `.assets/`，而 wrangler 4 对缺失的 assets 目录是**硬报错**，
+整个部署会直接终止：
+
+```
+✘ [ERROR] The directory specified by the "assets.directory" field in your
+configuration file does not exist: /path/to/repo/.assets
+```
+
+### 步骤 4b · Cloudflare Workers Builds 面板
+
+用 Workers Builds 自动部署时，仓库会被 clone 到构建容器的 `/opt/buildhome/repo`。
+面板设置必须是：
+
+| 字段 | 值 |
+| --- | --- |
+| Build command | `npm run build:docs` |
+| Deploy command | `npx wrangler deploy` |
+
+Build command 留空是最常见的踩法：面板只跑 `wrangler deploy`，`.assets` 没人生成，
+于是每一条构建都在上面那个报错上挂掉。仓库里**没有** `build` 这个 script
+（只有 `build:docs`），所以别填 `npm run build`。
+
+填 `npm run deploy` 也对，但它是 `build:docs && wrangler deploy`；若 Build command
+已经填了 `build:docs`，文档会构建两遍。推荐按上表分开填。
 
 ### 步骤 5 · 设 ADMIN_TOKEN
 
@@ -337,9 +420,10 @@ Cron 的清理批量也别加大。
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
 | `Queue "uapis-refresh" does not exist` | 跳了步骤 2 | `npx wrangler queues create uapis-refresh` |
-| `Couldn't find a D1 DB named 'uapis'` | `database_id` 还是 32 个 0 | 填真实 UUID（见步骤 1） |
+| `D1 binding 'DB' references database '000…' which was not found. [code: 10181]` | `database_id` 填了占位符 | 删掉 `database_id` 整个键（自动开通），或填真实 UUID |
+| `missing a database_id`（跑 `db:migrate` 时）| 靠库名反查 UUID 没兜住（workers-sdk#13632）| `npx wrangler d1 create uapis`，把 UUID 填回配置并提交 |
 | `/healthz` 一直 ok，但 `/status` 500 或 `cache.rows` 恒为 0 | 迁移没跑，或打到了别的库 | `npm run db:migrate`（`/healthz` 的 `SELECT 1` 不碰表，查不出这个问题） |
-| `/docs/` 404，但 API 正常 | 裸跑了 `wrangler deploy` | `npm run deploy` |
+| `The directory specified by the "assets.directory" field ... does not exist: .../.assets` | 裸跑了 `wrangler deploy`，或 Workers Builds 的 Build command 留空 | 本地 `npm run deploy`；面板 Build command 填 `npm run build:docs` |
 | 上游 UA 显示 `uapis.example.workers.dev` | 改完域名忘了改 `SITE_URL` | 改 `vars.SITE_URL` 再部署 |
 | `/admin/*` 一直 503 | 没设 `ADMIN_TOKEN` secret | `npx wrangler secret put ADMIN_TOKEN` |
 | 改了 `wrangler.jsonc` 后 typecheck 报 `Env` 缺绑定 | 绑定变了 | `npm run cf:typegen` 然后 `npm run typecheck` |

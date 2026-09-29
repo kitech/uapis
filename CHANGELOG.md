@@ -155,8 +155,24 @@ P0 骨架 + P1 端点完善 + P2 零 key 源批量接入 + P3 付费代理通道
 - 文档口径按官方文档校准：Free 计划可建 10 个 D1 库（不是 1 个）、Queues 消息保留
   **24 小时**（不是 4 天）、**D1 免费额度触顶是硬失败**（查询报错直到 UTC 日切，
   不是计费超支）、Workers 请求触顶返回 **Error 1027**
-- 离线测试：`vitest-pool-workers` + `@msw/cloudflare` 出站拦截，232 个用例全离线
+- 离线测试：`vitest-pool-workers` + `@msw/cloudflare` 出站拦截，240 个用例全离线
 - VitePress 文档站（首页/快速上手/数据源/限流/错误/合规 + 参考页），部署到同一 Worker 的 `/docs`
+
+### Changed
+
+- **D1 改由 wrangler 自动开通，不再往仓库里塞占位 `database_id`**。原先
+  `wrangler.jsonc` 写的是 32 个 0，干净 checkout + CI 每次都会撞上
+  `[code: 10181] D1 binding 'DB' references database '000…' which was not found`。
+  根因是 wrangler 判定「有没有 UUID」的实现是 `!!db?.uuid`——**非空就算有**，
+  于是占位符短路掉自动开通分支，被当作一个合法 ID 直接送去 API。
+  现在删掉该键，首次 `deploy` 自动建出名为 `uapis` 的库。副作用是仓库里不再有
+  账号专属值，fork 不用手改；`database_id` 本身是公开标识符不是凭据，仍可随时手填
+- **`migrations_pattern: "migrations/[0-9]*.sql"`**：`migrations/seed.sql` 与真正的迁移
+  同住一个目录，而 `migrations apply` 默认发现规则是 `migrations/*.sql`——seed 会被
+  当成一次迁移应用到生产。它是 `INSERT OR REPLACE`，一旦重跑就会把
+  `maintenance.mode` 覆盖回 `active`、`cors.origins` 覆盖回 `*`，
+  正好抵消只读模式。加 pattern 后生产只建表、设置回落到代码默认值，
+  `db:seed:local` 保持手工可用
 
 ### Fixed
 
