@@ -2,7 +2,14 @@ import { env as cloudflareEnv } from 'cloudflare:workers'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { http, HttpResponse } from 'msw'
 import { network } from './server'
-import { ApiError, ErrorCode, mapUpstreamStatus } from '../src/core/errors'
+import {
+  ApiError,
+  ErrorCode,
+  isStorageError,
+  mapUpstreamStatus,
+  rawErrorText,
+  storageFail,
+} from '../src/core/errors'
 import { buildCacheKey, hashPairs, sanitizeId, TTL_POLICIES } from '../src/core/ttl'
 import { clearSettingsMemo, putSettings, SETTINGS_DEFAULTS } from '../src/core/settings'
 import { decodeTarget, encodeTarget } from '../src/core/target'
@@ -79,6 +86,7 @@ describe('错误体与状态码映射', () => {
         'RATE_LIMITED',
         'REBUILDING',
         'SERVICE_UNAVAILABLE',
+        'STORAGE_UNAVAILABLE',
         'UNAUTHORIZED',
         'UPSTREAM_ERROR',
         'UPSTREAM_TIMEOUT',
@@ -92,6 +100,60 @@ describe('错误体与状态码映射', () => {
     expect(mapUpstreamStatus(429)).toEqual({ status: 429, code: 'RATE_LIMITED' })
     expect(mapUpstreamStatus(500)).toEqual({ status: 502, code: 'UPSTREAM_ERROR' })
     expect(mapUpstreamStatus(401)).toEqual({ status: 502, code: 'UPSTREAM_ERROR' })
+    // 504 以前被 >= 500 吃掉，UPSTREAM_TIMEOUT 从来没被真正返回过
+    expect(mapUpstreamStatus(504)).toEqual({ status: 504, code: 'UPSTREAM_TIMEOUT' })
+  })
+})
+
+describe('D1 原始错误透传', () => {
+  type Chained = Error & { cause?: unknown }
+
+  function d1Error(): Chained {
+    const top = new Error('D1_ERROR') as Chained
+    top.cause = new Error('no such table: cache')
+    return top
+  }
+
+  it('rawErrorText 沿 cause 链拼出真正原因', () => {
+    expect(rawErrorText(d1Error())).toBe('D1_ERROR: no such table: cache')
+  })
+
+  it('rawErrorText 对循环 cause 不会死循环', () => {
+    const a = new Error('a') as Chained
+    const b = new Error('b') as Chained
+    a.cause = b
+    b.cause = a
+    expect(rawErrorText(a)).toBe('a: b')
+  })
+
+  it('rawErrorText 跳过重复段', () => {
+    const top = new Error('boom') as Chained
+    top.cause = new Error('boom')
+    expect(rawErrorText(top)).toBe('boom')
+  })
+
+  it('rawErrorText 处理非 Error 与空 message', () => {
+    expect(rawErrorText('boom')).toBe('boom')
+    expect(rawErrorText(new Error())).toBe('Error')
+  })
+
+  it('isStorageError 只认 D1 错误', () => {
+    expect(isStorageError(d1Error())).toBe(true)
+    expect(isStorageError(new Error('SQLITE_CONSTRAINT: UNIQUE failed'))).toBe(true)
+    expect(isStorageError(new Error('upstream responded 500'))).toBe(false)
+    expect(isStorageError(new ApiError('NOT_FOUND', 'nope', 404))).toBe(false)
+  })
+
+  it('storageFail 是 503、透传原文且不带 Retry-After', () => {
+    const error = storageFail(d1Error(), { request_id: 'r-1' })
+    expect(error.code).toBe('STORAGE_UNAVAILABLE')
+    expect(error.status).toBe(503)
+    expect(error.retryAfter).toBeUndefined()
+    expect(error.toBody()).toEqual({
+      code: 'STORAGE_UNAVAILABLE',
+      message: 'D1_ERROR: no such table: cache',
+      details: { request_id: 'r-1' },
+    })
   })
 })
 

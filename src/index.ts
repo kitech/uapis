@@ -3,7 +3,7 @@ import type { AppEnv } from './types'
 import { cors } from './core/cors'
 import { rateLimit } from './core/ratelimit'
 import { requestId } from './core/requestId'
-import { ApiError, ErrorCode, fail } from './core/errors'
+import { ApiError, ErrorCode, fail, isStorageError, rawErrorText, storageFail } from './core/errors'
 import { errorResponse, jsonBody } from './core/envelope'
 import { bumpCounter, logError } from './core/logger'
 import { cacheRowCount, pruneExpired } from './core/cache'
@@ -62,15 +62,39 @@ app.onError((error, c) => {
     bumpCounter(`error:${error.code}`)
     return errorResponse(c, error)
   }
+
+  // D1 故障：把 cause 链上的原文一起返回，否则客户端只看到一个 D1_ERROR。
+  // 透传表名/列名会暴露内部结构，这是自建实例下的有意取舍。
+  if (isStorageError(error)) {
+    const reqId = c.get('requestId')
+    const storage = storageFail(error, { request_id: reqId })
+    bumpCounter(`error:${storage.code}`)
+    logError({
+      event: 'storage_error',
+      path: c.req.path,
+      method: c.req.method,
+      request_id: reqId,
+      message: storage.message,
+      stack: error instanceof Error ? error.stack : undefined,
+    })
+    return errorResponse(c, storage)
+  }
+
+  const reqId = c.get('requestId')
   logError({
     event: 'unhandled_error',
     path: c.req.path,
     method: c.req.method,
-    request_id: c.get('requestId'),
-    message: error instanceof Error ? error.message : String(error),
+    request_id: reqId,
+    message: rawErrorText(error),
     stack: error instanceof Error ? error.stack : undefined,
   })
-  return errorResponse(c, new ApiError(ErrorCode.InternalError, 'internal error', 500))
+  // 这条路径以前完全不计数，/status 里看不到任何 INTERNAL_ERROR
+  bumpCounter(`error:${ErrorCode.InternalError}`)
+  return errorResponse(
+    c,
+    new ApiError(ErrorCode.InternalError, 'internal error', 500, { request_id: reqId }),
+  )
 })
 
 export default {

@@ -1,3 +1,6 @@
+import { bumpCounter, logError } from './logger'
+import { rawErrorText } from './errors'
+
 /**
  * provider 速率闸：把上游最小间隔固化到 D1，跨实例生效。
  * 被限速时不 sleep，而是把刷新任务用 `delaySeconds` 重投队列。
@@ -30,8 +33,12 @@ export async function checkGate(
       .bind(provider, next)
       .run()
     return { allowed: true, waitSeconds: 0 }
-  } catch {
-    return { allowed: true, waitSeconds: 0 }
+  } catch (error) {
+    // 最危险的一处：以前 catch 里 return { allowed: true }，D1 一挂这个跨实例
+    // 限速就静默失效，对上游变成无限回源，付费通道会直接烧穿额度。
+    // 闸门失效必须响，不能悄悄放行。
+    logError({ event: 'gate_check_failed', provider, message: rawErrorText(error) })
+    throw error
   }
 }
 
@@ -42,8 +49,10 @@ export async function noteProviderFailure(env: Env, provider: string): Promise<v
     )
       .bind(provider, Date.now())
       .run()
-  } catch {
-    // ignore
+  } catch (error) {
+    // 纯记账，失败不影响主流程；但"失败次数一直不累计"这件事必须留痕
+    bumpCounter('gate_note_failed')
+    logError({ event: 'gate_note_failed', provider, message: rawErrorText(error) })
   }
 }
 

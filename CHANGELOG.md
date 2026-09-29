@@ -2,6 +2,49 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，版本号遵循语义化版本。
 
+## [Unreleased]
+
+### Added
+
+- `deploy` 脚本串上 `db:migrate`：首次 `wrangler deploy` 自动开通 D1 后立刻建表，
+  不再需要手工迁移（本地会问一次 y/N——`d1 migrations apply` 没有 `--yes` 标志，
+  非交互环境才自动跳过）
+- 新错误码 `STORAGE_UNAVAILABLE`（503）：D1 失败时沿 `cause` 链透传原始错误文本，
+  典型形如 `D1_ERROR: no such table: cache`（顶层 `message` 在生产环境只有 `D1_ERROR`，
+  真正原因都在 cause 上）
+- `/healthz` 增加 `schema` 字段：探测 `cache/settings/quota/stats/gate` 五张表是否存在。
+  原来的 `SELECT 1` 不碰任何表，迁移没跑它照样 200
+- `/status` 增加 `degraded` 数组：各 D1 区块独立降级，缺表时整页不再 500
+- `/status` 的 `providers[].credits_error` / `channels[].credits_error`：
+  读不到额度时给出原始错误，而不是回落成 `used: 0`
+- `INTERNAL_ERROR` 响应体补 `details.request_id`，与 `X-Request-ID` 一致
+
+### Fixed
+
+- `consumeCredits` / `consumeQueueSlot` / `readRow` 不再吞掉 D1 异常：
+  以前分别返回 `false` / `false` / `0`，前两个被报成 `QUOTA_EXHAUSTED`
+  （"今日额度用尽"，还带 `Retry-After: 3600`），原因完全错误
+- `checkGate` 不再在 D1 故障时返回 `allowed: true`：那会让跨实例限速静默失效、
+  对上游无限回源，直接烧穿付费通道额度
+- 队列 send 失败不再被报成 `QUOTA_EXHAUSTED`：现在返回 `SERVICE_UNAVAILABLE` +
+  `X-Queue: unavailable`
+- `mapUpstreamStatus(504)` 不再被 `>= 500` 吃掉，`UPSTREAM_TIMEOUT` 首次真正可达
+- `onError` 的非 `ApiError` 分支补 `error:INTERNAL_ERROR` 计数
+- `logError` 加序列化兜底，避免 `JSON.stringify` 二次抛错把原始错误吃掉
+- `getSetting` / `allSettings` / `readStats` / `noteProviderFailure` 的静默兜底
+  补 `setting_fallback` / `settings_read_failed` / `stats_read_failed` /
+  `gate_note_failed` 计数器，故障不再无声
+- `NO_MATCH` 标注为预留码，不再在文档里宣传一个不会返回的错误码
+- 部署文档：删掉已被 wrangler 4.102 修好的 `missing a database_id` 绕行说明，
+  Workers Builds 面板的 Deploy command 补上迁移步骤
+
+### Changed
+
+- `STORAGE_UNAVAILABLE` 刻意不返回 `Retry-After`（不给客户端重试指令）
+- `getSetting` 保留代码默认值兜底（不随其它 D1 读取一起改成上抛）：
+  它被限流中间件和 T1 命中路径调用，上抛会把存储故障放大成全站不可用。
+  故障本身由 `setting_fallback` 计数器和 `/status` 暴露
+
 ## [0.1.0] - 2026-09-27
 
 P0 骨架 + P1 端点完善 + P2 零 key 源批量接入 + P3 付费代理通道 + P4 再加三个零 key 源

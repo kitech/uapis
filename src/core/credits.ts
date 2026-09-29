@@ -1,4 +1,6 @@
 import { getIntSetting } from './settings'
+import { logError } from './logger'
+import { rawErrorText } from './errors'
 
 /**
  * 第三方额度记账（D1 `quota`）。逻辑上把「每天最多 N 次回源」变成硬上限，
@@ -24,8 +26,12 @@ async function readRow(env: Env, provider: string, channel: string): Promise<num
       .bind(today(), provider, channel)
       .first<{ used: number }>()
     return row?.used ?? 0
-  } catch {
-    return 0
+  } catch (error) {
+    // 以前 catch 里 return 0，等于对外声称"今天一次额度都没用过"。
+    // D1 故障时这个假值比报错危险得多：记账失真意味着额度上限形同虚设。
+    // 记完日志原样上抛（不 new Error 包装，包装会丢 stack）。
+    logError({ event: 'quota_read_failed', provider, channel, message: rawErrorText(error) })
+    throw error
   }
 }
 
@@ -64,8 +70,11 @@ export async function consumeCredits(
       .bind(today(), provider, channel, cost, limit)
       .run()
     return changed(result) > 0
-  } catch {
-    return false
+  } catch (error) {
+    // 以前 return false，于是"D1 写失败"和"额度真的用完"返回同一个结果，
+    // 对外被报成 QUOTA_EXHAUSTED——原因是错的，客户端会一直等到 UTC 日切。
+    logError({ event: 'quota_consume_failed', provider, channel, message: rawErrorText(error) })
+    throw error
   }
 }
 
@@ -112,8 +121,10 @@ export async function consumeQueueSlot(env: Env, cost = 1): Promise<boolean> {
       .bind(today(), QUEUE_ROW.provider, QUEUE_ROW.channel, cost, limit > 0 ? limit : 3000)
       .run()
     return changed(result) > 0
-  } catch {
-    return false
+  } catch (error) {
+    // 同 consumeCredits：false 会被 queue.ts 当成 'budget'（额度用完）
+    logError({ event: 'queue_slot_consume_failed', message: rawErrorText(error) })
+    throw error
   }
 }
 

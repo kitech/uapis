@@ -40,7 +40,7 @@ export function buildOpenApi(siteUrl: string): Record<string, unknown> {
         },
         502: { description: 'UPSTREAM_ERROR', content: jsonContent(ERROR_REF) },
         503: {
-          description: 'PROVIDER_UNCONFIGURED / QUOTA_EXHAUSTED / REBUILDING / SERVICE_UNAVAILABLE',
+          description: 'PROVIDER_UNCONFIGURED / QUOTA_EXHAUSTED / REBUILDING / SERVICE_UNAVAILABLE / STORAGE_UNAVAILABLE',
           content: jsonContent(ERROR_REF),
         },
         504: { description: 'UPSTREAM_TIMEOUT', content: jsonContent(ERROR_REF) },

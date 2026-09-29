@@ -1,4 +1,6 @@
 import { today } from './credits'
+import { bumpCounter, logError } from './logger'
+import { rawErrorText } from './errors'
 
 /** `stats` 表只由 cron / queue 低频写入（<100 行/天），不参与请求热路径 */
 export async function bumpStat(env: Env, path: string, delta = 1): Promise<void> {
@@ -22,7 +24,9 @@ export async function readStats(env: Env): Promise<{ day: string; path: string; 
       .bind(today())
       .all<{ day: string; path: string; n: number }>()
     return result.results ?? []
-  } catch {
+  } catch (error) {
+    bumpCounter('stats_read_failed')
+    logError({ event: 'stats_read_failed', message: rawErrorText(error) })
     return []
   }
 }

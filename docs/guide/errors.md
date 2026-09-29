@@ -24,17 +24,21 @@
 | `UNAUTHORIZED` | 401 | 管理接口缺 token 或 token 错 | 补 `Authorization: Bearer` |
 | `FORBIDDEN` | 403 | 已知身份但不允许 | 检查 scope |
 | `NOT_FOUND` | 404 | 路由不存在或上游 404 | 检查路径 |
-| `NO_MATCH` | 404 | 路径合法但没有结果 | 正常业务结果 |
+| `NO_MATCH` | 404 | 预留码，当前没有任何路径返回它（无结果一律 `NOT_FOUND`） | — |
 | `FILE_TOO_LARGE` | 413 | 上游响应超过 512KB 上限（`MAX_UPSTREAM_BYTES`） | 用更精确的查询 |
 | `RATE_LIMITED` | 429 / 503 | 入口限流（429）或 provider 闸门冷却（503） | 看 `Retry-After` / `details.retry_in` |
-| `INTERNAL_ERROR` | 500 | Worker 内部异常 | 带上 `X-Request-ID` 反馈 |
+| `INTERNAL_ERROR` | 500 | Worker 内部异常，`details.request_id` 与响应头一致 | 带上 `request_id` 反馈 |
 | `UPSTREAM_ERROR` | 502 | 上游 5xx | 稍后重试，会命中负缓存 |
 | `PROVIDER_UNCONFIGURED` | 503 | 缺 key，或付费通道一个都没配 | 配 `details.setting` 指定的设置项；tier C 看 `details.any_of`，配其中任意一个 |
 | `QUOTA_EXHAUSTED` | 503 | 今日队列/上游额度用尽（`quota.<provider>.default` 或 `quota.proxy.*`） | 等 UTC 日切或调大额度；`details.provider` / `details.channel` 说明是哪个桶 |
 | `REBUILDING` | 503 | 已入队但还没有数据 | 按 `Retry-After` 重试 |
-| `SERVICE_UNAVAILABLE` | 503 | 只读/维护模式且无缓存可返回 | 看 `details.mode`；只读模式下**已有缓存照常返回**，503 只出现在完全没有缓存时 |
+| `SERVICE_UNAVAILABLE` | 503 | 只读/维护模式且无缓存可返回；也用于队列 send 失败（`X-Queue: unavailable`） | 看 `details.mode`；只读模式下**已有缓存照常返回**，503 只出现在完全没有缓存时 |
+| `STORAGE_UNAVAILABLE` | 503 | D1 读写失败，`message` 是 D1 原始错误（沿 cause 链拼出，通常形如 `D1_ERROR: no such table: cache`） | 不返回 `Retry-After`；`no such table` 就是漏了 `npm run db:migrate` |
 | `UPSTREAM_TIMEOUT` | 504 | 上游超时（含"连上了但正文没到"） | 缩小查询范围 |
 | `ACCEPTED` | 202 | 配合 `Prefer: respond-async`，已入队 | 轮询同一路径 |
+
+> `STORAGE_UNAVAILABLE` 会把 D1 的原始错误文本（含表名/列名）透传给客户端。
+> 这是自建实例下的有意取舍：报错可定位性优先于隐藏内部结构。
 
 ## 排障顺序
 
@@ -50,6 +54,33 @@
 4. `X-RateLimit-Remaining: 0` 就是入口限流，不是上游问题。
 
 ## 常见问题
+
+**`503 STORAGE_UNAVAILABLE`，message 里是 `no such table: xxx`？**
+数据库存在但表没建。最常见的原因是首次部署漏了迁移——`wrangler deploy` 会自动开通
+D1，但不会自动建表。跑 `npm run db:migrate`（`npm run deploy` 现在已经自动带上这一步，
+只在「部署成功但迁移没跟上」时才需要手工补）。
+`/healthz` 的 `schema` 字段会提前告诉你这件事：`schema: false` 就是没建齐。
+
+**额度看起来一直在涨，但 D1 明明挂了？**
+不会了。`consumeCredits` / `consumeQueueSlot` / `readRow` 以前在 D1 故障时分别返回
+`false` / `false` / `0`——前两个被报成 `QUOTA_EXHAUSTED`（原因完全错），
+第三个让额度统计永远显示「今天没用过」。现在这些情况都会抛错并计入
+`error:STORAGE_UNAVAILABLE`，队列消费侧按可重试处理。
+
+**D1 挂了会不会无限回源烧掉付费通道的额度？**
+不会。`refreshTarget` 里 `consumeCredits` 在真正 fetch 之前（`refresh.ts`），
+记账失败直接抛错，请求根本走不到上游。速率闸 `checkGate` 也不再在 D1 故障时
+静默 `allowed: true`——那正是以前会烧穿额度的地方。
+
+**`/status` 顶部 `degraded` 非空说明什么？**
+某个区块读 D1 失败了（`quota` / `gate` / `queue` / `cache` / `credits:<provider>`），
+对应字段已回落中性值，`/status` 本身不会因为它 500。`settings` 和 `stats` 的降级
+不写进 `degraded`，它们分别由 `setting_fallback` / `stats_read_failed` 计数器暴露。
+
+**为什么队列坏了是 `SERVICE_UNAVAILABLE` 而不是 `QUOTA_EXHAUSTED`？**
+两者是完全不同的故障：前者是队列 send 失败（`X-Queue: unavailable`），
+后者是今日额度真的用尽。早期版本把两者混在一起报，还带 `Retry-After: 3600`，
+会让客户端白等一整天。
 
 **为什么第一次是 `REFRESH` 第二次才是 `HIT`？**
 `REFRESH` 表示本次同步回源并写了缓存，这是设计行为。

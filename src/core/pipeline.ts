@@ -152,6 +152,22 @@ export async function serveResource(
     )
   }
 
+  // enqueueRefresh 的 'error' 是队列 send 失败，和 'budget'（额度用完）是两回事。
+  // 以前非 'sent' 一律落到下面的 QUOTA_EXHAUSTED，还带 X-Quota: exhausted
+  // 和 Retry-After: 3600——把"队列坏了"说成"额度用尽"，排障方向会被带偏，
+  // 客户端还会白等一整天。
+  if (queued === 'error') {
+    logError({ event: 'queue_send_failed', provider: provider.name, key })
+    return errorResponse(
+      c,
+      fail(ErrorCode.ServiceUnavailable, 'refresh queue unavailable', 503, {
+        provider: provider.name,
+        reason: 'queue send failed',
+      }),
+      { 'X-Queue': 'unavailable' },
+    )
+  }
+
   logError({ event: 'queue_budget_exhausted', provider: provider.name, key, result: queued })
   if (fallback !== null) {
     return serveHit(c, fallback, 'STALE-FALLBACK')

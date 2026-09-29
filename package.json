@@ -15,7 +15,7 @@
     "test:watch": "vitest",
     "build:docs": "vitepress build docs && node scripts/stage-docs.mjs",
     "dev:docs": "vitepress dev docs",
-    "deploy": "npm run build:docs && wrangler deploy",
+    "deploy": "npm run build:docs && wrangler deploy && npm run db:migrate",
     "deploy:dry": "npm run build:docs && wrangler deploy --dry-run --outdir=dist",
     "cf:typegen": "wrangler types",
     "db:migrate:local": "wrangler d1 migrations apply DB --local",

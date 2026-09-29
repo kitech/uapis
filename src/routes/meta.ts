@@ -4,15 +4,24 @@ import { jsonBody, textBody } from '../core/envelope'
 import { allEndpoints, REGISTRY } from '../core/registry'
 import { buildOpenApi } from '../core/openapi'
 import { cacheRowCount } from '../core/cache'
-import { countersSnapshot, loggerState } from '../core/logger'
+import { bumpCounter, countersSnapshot, loggerState, logError } from '../core/logger'
 import { getIntSetting, getSetting } from '../core/settings'
 import { siteUrlOf } from '../core/site'
-import { queueBudget, readAllQuota, readCredits } from '../core/credits'
+import {
+  queueBudget,
+  readAllQuota,
+  readCredits,
+  type CreditsSnapshot,
+} from '../core/credits'
 import { readGate } from '../core/gate'
 import { readStats } from '../core/stats'
+import { rawErrorText } from '../core/errors'
 import type { ProxyChannel } from '../core/fetcher'
 
 const meta = new Hono<AppEnv>()
+
+/** 迁移必须建出来的表；缺任一张就说明 db:migrate 没跑 */
+const REQUIRED_TABLES = ['cache', 'settings', 'quota', 'stats', 'gate'] as const
 
 meta.get('/openapi.json', (c) => {
   const siteUrl = siteUrlOf(c.req)
@@ -23,23 +32,57 @@ meta.get('/openapi.json', (c) => {
 
 meta.get('/healthz', async (c) => {
   let d1 = true
+  let schema = false
   try {
     await c.env.DB.prepare('SELECT 1 AS ok').first()
+    // SELECT 1 不碰任何表，迁移没跑它照样 200。补一次真实的表探测，
+    // 让"部署了但忘了迁移"在 healthz 上就暴露，而不是等到 /status 才炸。
+    const row = await c.env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM sqlite_master
+       WHERE type = 'table' AND name IN (${REQUIRED_TABLES.map(() => '?').join(',')})`,
+    )
+      .bind(...REQUIRED_TABLES)
+      .first<{ n: number }>()
+    schema = (row?.n ?? 0) === REQUIRED_TABLES.length
   } catch {
     d1 = false
+    schema = false
   }
+  const ok = d1 && schema
   return jsonBody(
     c,
-    { status: d1 ? 'ok' : 'degraded', d1, ts: new Date().toISOString() },
-    { status: d1 ? 200 : 503 },
+    { status: ok ? 'ok' : 'degraded', d1, schema, ts: new Date().toISOString() },
+    { status: ok ? 200 : 503 },
   )
 })
 
 meta.get('/status', async (c) => {
+  const degraded: string[] = []
+
+  /**
+   * 单个区块失败不该拖垮整页——/status 恰恰是 D1 故障时最该活着的那一页，
+   * 拿它排障的人正需要看到 degraded 列表和各段的降级标记。
+   * 失败记进 degraded、计入 minute.buckets，字段回落中性值。
+   */
+  const section = async <T>(label: string, fn: () => Promise<T>, fallback: T): Promise<T> => {
+    try {
+      return await fn()
+    } catch (error) {
+      degraded.push(label)
+      bumpCounter(`degraded:${label}`)
+      logError({ event: 'status_section_failed', section: label, message: rawErrorText(error) })
+      return fallback
+    }
+  }
+
   const softRows = await getIntSetting(c.env, 'cache.soft_rows')
   const softQueue = await getIntSetting(c.env, 'queue.soft_limit')
-  const budget = await queueBudget(c.env, softQueue > 0 ? softQueue : 2700)
-  const rows = await cacheRowCount(c.env).catch(() => 0)
+  const budget = await section(
+    'queue',
+    () => queueBudget(c.env, softQueue > 0 ? softQueue : 2700),
+    { used: 0, limit: 0, softLimit: softQueue, exhausted: true, throttled: true },
+  )
+  const rows = await section('cache', () => cacheRowCount(c.env), 0)
 
   const providers = await Promise.all(
     REGISTRY.map(async (provider) => {
@@ -53,7 +96,25 @@ meta.get('/status', async (c) => {
       // 直连的 provider 每次回源都扣 quota.<provider>.default，所以要报；
       // tier C 记在付费通道维度，用 channels[].credits 表达，这里留 null 免得两处数字打架
       const isTierC = (provider.requiredAnyOf ?? []).length > 0
-      const credits = isTierC ? null : await readCredits(c.env, provider.name, 'default')
+      // 额度表缺失/故障时不能回落成 used:0——那正是"迁移没跑"最难查的假象。
+      // 置 null 并把原始错误放进 credits_error，让客户端能区分
+      // "tier C 看 channels" 和 "读不到额度"。
+      let credits: CreditsSnapshot | null = null
+      let creditsError: string | null = null
+      if (!isTierC) {
+        try {
+          credits = await readCredits(c.env, provider.name, 'default')
+        } catch (error) {
+          degraded.push(`credits:${provider.name}`)
+          bumpCounter('degraded:credits')
+          creditsError = rawErrorText(error)
+          logError({
+            event: 'status_section_failed',
+            section: `credits:${provider.name}`,
+            message: creditsError,
+          })
+        }
+      }
 
       // tier C 没有单一 auth key，而是"任一付费通道可用即可"；
       // /status 要能一眼看出当前到底配了哪条通道、各剩多少 credits
@@ -63,17 +124,34 @@ meta.get('/status', async (c) => {
           ? null
           : await Promise.all(
               channelKeys.map(async (key) => {
-                const channelCredits = await readCredits(c.env, 'proxy', channelOf(key))
+                let channelCredits: CreditsSnapshot | null = null
+                let channelError: string | null = null
+                try {
+                  channelCredits = await readCredits(c.env, 'proxy', channelOf(key))
+                } catch (error) {
+                  degraded.push(`credits:${key}`)
+                  bumpCounter('degraded:credits')
+                  channelError = rawErrorText(error)
+                  logError({
+                    event: 'status_section_failed',
+                    section: `credits:${key}`,
+                    message: channelError,
+                  })
+                }
                 return {
                   setting: key,
                   configured: (await getSetting(c.env, key)).length > 0,
-                  credits: {
-                    used: channelCredits.used,
-                    limit: channelCredits.limit,
-                    remaining: Number.isFinite(channelCredits.remaining)
-                      ? channelCredits.remaining
-                      : null,
-                  },
+                  credits:
+                    channelCredits === null
+                      ? null
+                      : {
+                          used: channelCredits.used,
+                          limit: channelCredits.limit,
+                          remaining: Number.isFinite(channelCredits.remaining)
+                            ? channelCredits.remaining
+                            : null,
+                        },
+                  credits_error: channelError,
                 }
               }),
             )
@@ -97,7 +175,12 @@ meta.get('/status', async (c) => {
         credits:
           credits === null
             ? null
-            : { used: credits.used, limit: credits.limit, remaining: Number.isFinite(credits.remaining) ? credits.remaining : null },
+            : {
+                used: credits.used,
+                limit: credits.limit,
+                remaining: Number.isFinite(credits.remaining) ? credits.remaining : null,
+              },
+        credits_error: creditsError,
       }
     }),
   )
@@ -118,9 +201,12 @@ meta.get('/status', async (c) => {
     },
     cache: { rows, soft_rows: softRows },
     queue: { used: budget.used, limit: budget.limit, soft_limit: budget.softLimit, throttled: budget.throttled },
-    quota: await readAllQuota(c.env),
-    gate: await readGate(c.env),
+    // stats 不走 section：readStats 本身就吞异常返回 []，由它自己的
+    // stats_read_failed 计数器暴露，套 section 反而永远不会触发
+    quota: await section('quota', () => readAllQuota(c.env), []),
+    gate: await section('gate', () => readGate(c.env), []),
     stats: await readStats(c.env),
+    degraded,
     minute: countersSnapshot(),
     logs: loggerState(),
     providers,

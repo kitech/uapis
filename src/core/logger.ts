@@ -1,3 +1,5 @@
+import { rawErrorText } from './errors'
+
 /**
  * Workers Logs 免费额度为 20 万 events/天（保留 3 天），因此：
  *   * 错误全量记录（带 request_id 便于排障）
@@ -41,7 +43,22 @@ export function countersSnapshot(now = Date.now()): { minute: string; buckets: R
 }
 
 export function logError(fields: Record<string, unknown>): void {
-  console.error(JSON.stringify({ level: 'error', ...fields }))
+  // fields 里可能混进 Error、循环引用或 BigInt，JSON.stringify 自己会抛。
+  // 日志器一旦抛异常，最需要记录的那个错误就被吃掉了，所以这里必须兜住。
+  try {
+    console.error(JSON.stringify({ level: 'error', ...fields }))
+  } catch {
+    const safe: Record<string, unknown> = {}
+    for (const [key, value] of Object.entries(fields)) {
+      safe[key] =
+        value instanceof Error
+          ? rawErrorText(value)
+          : typeof value === 'string'
+            ? value
+            : undefined
+    }
+    console.error(JSON.stringify({ level: 'error', serialize_failed: true, ...safe }))
+  }
 }
 
 export function logSampled(fields: Record<string, unknown>): void {

@@ -1,3 +1,6 @@
+import { bumpCounter, logError } from './logger'
+import { rawErrorText } from './errors'
+
 /**
  * D1 `settings` 读取层。
  * 隔离实例内做 30s 记忆化，避免每个请求都为配置付出一次 D1 行读。
@@ -61,7 +64,14 @@ export async function getSetting(env: Env, key: string): Promise<string> {
       v: string
     }>()
     if (row !== null && typeof row.v === 'string') value = row.v
-  } catch {
+  } catch (error) {
+    // 刻意保留兜底，和下面 credits/gate 的处理相反。
+    // 这些键是 maintenance.mode / cache.t1 / ratelimit.rpm 这类开关：
+    // getSetting 被限流中间件、isT1Enabled、每个 provider 的 auth 检查都调用，
+    // 一旦上抛，D1 故障会让 T1 缓存命中也一起 503——把存储故障放大成全站不可用。
+    // 但必须留痕：memo 30s，所以同一个键故障期最多记一次，不会打爆日志。
+    bumpCounter('setting_fallback')
+    logError({ event: 'setting_fallback', key, message: rawErrorText(error) })
     value = fallback
   }
 
@@ -96,8 +106,9 @@ export async function allSettings(env: Env): Promise<Record<string, string>> {
     for (const row of result.results ?? []) {
       if (typeof row.k === 'string' && typeof row.v === 'string') merged[row.k] = row.v
     }
-  } catch {
-    // 保留默认值
+  } catch (error) {
+    bumpCounter('settings_read_failed')
+    logError({ event: 'settings_read_failed', message: rawErrorText(error) })
   }
   return merged
 }

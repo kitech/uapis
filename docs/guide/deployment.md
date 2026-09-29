@@ -83,9 +83,14 @@ D1 能自动开通、队列不能，原因是配置里**写了队列的具名**�
 
 ### 步骤 3 · 迁移表结构
 
-> **顺序上这步必须排在首次部署之后**（不写 `database_id` 时）。
-> 库是 `wrangler deploy` 顺带建出来的，库不存在，这步就无从下手。
-> 完整顺序：建队列 → `npm run deploy` → **回到这步** → 配 `ADMIN_TOKEN`。
+> **自动开通路线下，`npm run deploy` 已经把这一步带上了**（`deploy` 脚本 =
+> `build:docs && wrangler deploy && npm run db:migrate`）。之所以能这么排，是因为库由
+> `wrangler deploy` 顺带建出来，迁移必须在它之后。
+>
+> 本地跑 `npm run deploy` 时 wrangler 会问一次 `y/N`（`d1 migrations apply` 没有
+> `--yes` 标志，非交互环境才自动跳过）；`npm run deploy:dry` 不含迁移。
+>
+> 完整顺序：建队列 → `npm run deploy`（内含迁移）→ 配 `ADMIN_TOKEN`。
 > 走手工建库路径（步骤 1 的备选）则不受此限，可以维持「先迁移后部署」。
 
 ```bash
@@ -103,10 +108,10 @@ wrangler 的 `<database>` 位置参数同时接受两者。这样改 `database_n
 > 本项目两者目前都叫 `uapis`/`DB` 且不会动，暂时用 binding 没问题；
 > 将来要分 staging 环境、binding 改名时记得换成 `wrangler d1 migrations apply uapis`。
 
-> **如果这里报 `missing a database_id`**（cloudflare/workers-sdk#13632 记录的现象：
-> 靠名字反查 UUID 在部分流程下没兜住），别纠结——按步骤 1 的手工路径
-> `npx wrangler d1 create uapis` 拿到 UUID、填进 `wrangler.jsonc`、提交，
-> 就回到确定的「按 ID 寻址」路径了。
+> **`missing a database_id` 在 wrangler ≥ 4.102 已经修好**（release #14275：远程
+> 子命令的按名寻址改走 API 解析）。本项目锁 4.141，不再需要这条绕行。
+> 万一还是报，按步骤 1 的手工路径 `npx wrangler d1 create uapis` 拿 UUID、
+> 填进 `wrangler.jsonc`、提交即可。
 
 **seed 不会跟着迁移跑。** `migrations/seed.sql` 和真正的迁移同住一个目录，而
 `migrations apply` 的默认发现规则是 `migrations/*.sql`——那会把 seed 一起当成一次迁移
@@ -143,8 +148,8 @@ Cloudflare 注入，不用管。只有名下有多个账号、且想免掉每次
 npm run deploy
 ```
 
-**首次部署时，这一步同时把 D1 库开出来**（见步骤 1）。所以如果走的是自动开通路线，
-第 3 步的迁移要等这一步做完才能做。
+**首次部署时，这一步同时把 D1 库开出来**（见步骤 1），并紧接着执行步骤 3 的迁移。
+所以自动开通路线下不需要任何手工的迁移步骤。
 
 **不要裸跑 `wrangler deploy`。** `wrangler.jsonc` 里 `assets.directory` 指向 `.assets`，
 而该目录已被 gitignore（`.gitignore` 第 3 行）——它是构建产物，由 `npm run build:docs`
@@ -166,14 +171,18 @@ configuration file does not exist: /path/to/repo/.assets
 | 字段 | 值 |
 | --- | --- |
 | Build command | `npm run build:docs` |
-| Deploy command | `npx wrangler deploy` |
+| Deploy command | `npx wrangler deploy && npx wrangler d1 migrations apply DB --remote` |
 
 Build command 留空是最常见的踩法：面板只跑 `wrangler deploy`，`.assets` 没人生成，
 于是每一条构建都在上面那个报错上挂掉。仓库里**没有** `build` 这个 script
 （只有 `build:docs`），所以别填 `npm run build`。
 
-填 `npm run deploy` 也对，但它是 `build:docs && wrangler deploy`；若 Build command
-已经填了 `build:docs`，文档会构建两遍。推荐按上表分开填。
+Deploy command 那一段就是步骤 3 + 步骤 4 串起来（对应 `npm run deploy` 的后两段）。
+省掉它的话面板部署同样不会建表，只能看到 `503 STORAGE_UNAVAILABLE: no such table`。
+构建容器是非交互环境，`d1 migrations apply` 的确认提示会自动跳过。
+
+Build command 填了 `build:docs` 的情况下**不要**再把 Deploy command 填成
+`npm run deploy`——那会让文档构建两遍。
 
 ### 步骤 5 · 设 ADMIN_TOKEN
 
@@ -227,13 +236,11 @@ curl -X PUT https://api.你的域名/admin/settings \
 ```bash
 BASE=https://api.你的域名
 
-# 1. D1 绑定能执行查询。注意：它跑的是 SELECT 1，不碰任何表，所以 ok 不代表表建好了
+# 1. D1 绑定能执行查询，且 5 张表都建好了（schema 为 true 才算迁移到位）
 curl -s $BASE/healthz
 
-# 2. 真正的迁移检查：/status 读 cache/settings/quota/stats/gate 五张表，
-#    其中 readAllQuota 与 readGate 没有 try/catch，表没建时这里直接 500
-curl -s -o /dev/null -w '%{http_code}\n' $BASE/status
-# 拿到 200 后再看内容：stackexchange 该是 unconfigured，其余 16 个都该 active
+# 2. /status 读 cache/settings/quota/stats/gate 五张表。
+#    缺表不会 500，但顶层 degraded 会列出失败区块，degraded 为 [] 才算全绿
 curl -s $BASE/status | head -c 2000
 
 # 3. 元数据：openapi 的 servers 必须是你的域名
@@ -264,19 +271,20 @@ curl -si $BASE/admin/settings | head -1
 
 ### `/status` 返回 200 也不等于一切正常
 
-`/status` 的各个读数对缺失的表处理方式不一样，一半是硬失败、一半是静默降级：
+`/status` 的各个读数对缺失的表处理方式不一样，**但现在整页都不会 500 了**——
+每个区块各自兜底，失败项记进顶层 `degraded` 数组：
 
 | 读的表 | 代码 | 表不存在时 |
 | --- | --- | --- |
-| `quota`（`/status` 里的 `quota` 字段） | `readAllQuota` | **抛异常 → `/status` 500** |
-| `gate` | `readGate` | **抛异常 → `/status` 500** |
-| `stats` | `readStats` | catch → 返回空数组 |
-| `quota`（`queueBudget` 内部） | `readRow` | catch → 记 0 次 |
-| `cache` | `cacheRowCount` + `.catch()` | 记 0 行 |
-| `settings` | `getSetting` | catch → **回落 `src/core/settings.ts` 的代码默认值** |
+| `quota`（`/status` 里的 `quota` 字段） | `readAllQuota` | `degraded` 含 `quota`，字段回落 `[]` |
+| `gate` | `readGate` | `degraded` 含 `gate`，字段回落 `[]` |
+| `quota`（`queueBudget` 内部） | `readRow` | `degraded` 含 `queue` |
+| `cache` | `cacheRowCount` | `degraded` 含 `cache`，记 0 行 |
+| `settings` | `getSetting` | 静默回落代码默认值（计数器 `setting_fallback`）|
+| `stats` | `readStats` | 静默返回空数组（计数器 `stats_read_failed`）|
 
-所以迁移漏跑的特征是：`/status` 直接 500，或者虽然 200 但 `cache.rows` 恒为 0、
-`providers[].credits` 全是 `used: 0`。别把"能打开"当成"迁移好了"。
+迁移漏跑的特征：`/healthz` 的 `schema: false`（503），`/status` 顶部 `degraded`
+非空。别把「能打开」当成「迁移好了」——`/healthz` 现在会做真正的表探测。
 
 ## 第二部分 · 日常运维
 
@@ -411,8 +419,9 @@ Cron 的清理批量也别加大。
 | --- | --- | --- |
 | `Queue "uapis-refresh" does not exist` | 跳了步骤 2 | `npx wrangler queues create uapis-refresh` |
 | `D1 binding 'DB' references database '000…' which was not found. [code: 10181]` | `database_id` 填了占位符 | 删掉 `database_id` 整个键（自动开通），或填真实 UUID |
-| `missing a database_id`（跑 `db:migrate` 时）| 靠库名反查 UUID 没兜住（workers-sdk#13632）| `npx wrangler d1 create uapis`，把 UUID 填回配置并提交 |
-| `/healthz` 一直 ok，但 `/status` 500 或 `cache.rows` 恒为 0 | 迁移没跑，或打到了别的库 | `npm run db:migrate`（`/healthz` 的 `SELECT 1` 不碰表，查不出这个问题） |
+| `missing a database_id`（跑 `db:migrate` 时）| wrangler < 4.102 的按名寻址缺陷 | 升级 wrangler；或 `npx wrangler d1 create uapis` 后填回 UUID |
+| `503 STORAGE_UNAVAILABLE`，message 含 `no such table: xxx` | 迁移没跑，或打到了别的库 | `npm run db:migrate` |
+| `/healthz` 返回 `schema: false` | 5 张表没建齐 | `npm run db:migrate` |
 | `The directory specified by the "assets.directory" field ... does not exist: .../.assets` | 裸跑了 `wrangler deploy`，或 Workers Builds 的 Build command 留空 | 本地 `npm run deploy`；面板 Build command 填 `npm run build:docs` |
 | UA 是全局固定的 `uapis/0.1.0 (+apple.com)`，不随访问域名变化 | 不是故障 | 无需处理 |
 | `/admin/*` 一直 503 | 没设 `ADMIN_TOKEN` secret | `npx wrangler secret put ADMIN_TOKEN` |

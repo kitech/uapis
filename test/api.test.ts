@@ -454,11 +454,25 @@ describe('元数据端点', () => {
   })
 
   it('/healthz 与 /status 可用', async () => {
-    expect((await call('/healthz')).status).toBe(200)
+    const healthRes = await call('/healthz')
+    const health = (await healthRes.json()) as {
+      status: string
+      d1: boolean
+      schema: boolean
+    }
+    // 测试环境跑的是 test/apply-migrations.ts，5 张表都在，
+    // 所以 schema 探测必须为 true——迁移没跑时 healthz 不会假装健康
+    expect(healthRes.status).toBe(200)
+    expect(health.status).toBe('ok')
+    expect(health.d1).toBe(true)
+    expect(health.schema).toBe(true)
     const body = (await (await call('/status')).json()) as {
       providers: { name: string; status: string; auth_required?: boolean; auth_optional?: boolean }[]
       free_tier_budget: Record<string, number>
+      degraded: string[]
     }
+    // 迁移齐全时不该有任何区块降级
+    expect(body.degraded).toEqual([])
     expect(body.providers.map((p) => p.name).sort()).toEqual([
       'arxiv',
       'crossref',
