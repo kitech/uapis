@@ -16,12 +16,12 @@ import {
 import { readGate } from '../core/gate'
 import { readStats } from '../core/stats'
 import { rawErrorText } from '../core/errors'
+import { runHealthChecks } from '../core/health'
+import { ensureSchema } from '../core/bootstrap'
+import { PROBE_PREFIX } from '../core/queue'
 import type { ProxyChannel } from '../core/fetcher'
 
 const meta = new Hono<AppEnv>()
-
-/** 迁移必须建出来的表；缺任一张就说明 db:migrate 没跑 */
-const REQUIRED_TABLES = ['cache', 'settings', 'quota', 'stats', 'gate'] as const
 
 meta.get('/openapi.json', (c) => {
   const siteUrl = siteUrlOf(c.req)
@@ -31,29 +31,19 @@ meta.get('/openapi.json', (c) => {
 })
 
 meta.get('/healthz', async (c) => {
-  let d1 = true
-  let schema = false
-  try {
-    await c.env.DB.prepare('SELECT 1 AS ok').first()
-    // SELECT 1 不碰任何表，迁移没跑它照样 200。补一次真实的表探测，
-    // 让"部署了但忘了迁移"在 healthz 上就暴露，而不是等到 /status 才炸。
-    const row = await c.env.DB.prepare(
-      `SELECT COUNT(*) AS n FROM sqlite_master
-       WHERE type = 'table' AND name IN (${REQUIRED_TABLES.map(() => '?').join(',')})`,
+  const report = await runHealthChecks(c.env)
+
+  // 兜底自举：监控总会轮询 healthz，而真实流量可能长时间为零。
+  // 幂等 DDL 重跑是安全的，所以这一处不判断「是否已试过」。
+  if (!report.schema) {
+    c.executionCtx.waitUntil(
+      ensureSchema(c.env).catch((error) => {
+        logError({ event: 'schema_bootstrap_failed', message: rawErrorText(error) })
+      }),
     )
-      .bind(...REQUIRED_TABLES)
-      .first<{ n: number }>()
-    schema = (row?.n ?? 0) === REQUIRED_TABLES.length
-  } catch {
-    d1 = false
-    schema = false
   }
-  const ok = d1 && schema
-  return jsonBody(
-    c,
-    { status: ok ? 'ok' : 'degraded', d1, schema, ts: new Date().toISOString() },
-    { status: ok ? 200 : 503 },
-  )
+
+  return jsonBody(c, report, { status: report.status === 'ok' ? 200 : 503 })
 })
 
 meta.get('/status', async (c) => {
@@ -201,10 +191,44 @@ meta.get('/status', async (c) => {
     },
     cache: { rows, soft_rows: softRows },
     queue: { used: budget.used, limit: budget.limit, soft_limit: budget.softLimit, throttled: budget.throttled },
+    // 补上只进 Workers Logs 的盲区：gate/stats/settings 的原始错误不经过
+    // 响应体，这里给出「缺哪张表 / 哪一列 / 哪条迁移」的可操作结论。
+    // 不跑队列探针：这个页面是给人排障时打开看的，每看一次就发一条队列
+    // 消息 + 写一行，属于纯浪费
+    schema: await section(
+      'schema',
+      async () => {
+        const report = await runHealthChecks(c.env, { probeQueue: false })
+        return {
+          ok: report.schema,
+          missing_tables: report.checks.schema.diff.missingTables,
+          missing_columns: report.checks.schema.diff.missingColumns,
+          missing_indexes: report.checks.schema.diff.missingIndexes,
+          migrations_pending: report.checks.migrations.pending,
+          write_ok: report.checks.write.ok,
+          warnings: report.warnings,
+        }
+      },
+      {
+        ok: false,
+        missing_tables: [],
+        missing_columns: {},
+        missing_indexes: [],
+        migrations_pending: [],
+        write_ok: false,
+        warnings: [],
+      },
+    ),
     // stats 不走 section：readStats 本身就吞异常返回 []，由它自己的
     // stats_read_failed 计数器暴露，套 section 反而永远不会触发
     quota: await section('quota', () => readAllQuota(c.env), []),
-    gate: await section('gate', () => readGate(c.env), []),
+    // readGate 是全表读，会带出 healthz 探针的哨兵行。滤掉，否则线上
+    // /status 会多出几条 provider=__healthz_probe__* 的假闸门
+    gate: await section(
+      'gate',
+      async () => (await readGate(c.env)).filter((row) => !row.provider.startsWith(PROBE_PREFIX)),
+      [],
+    ),
     stats: await readStats(c.env),
     degraded,
     minute: countersSnapshot(),

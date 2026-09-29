@@ -6,14 +6,37 @@
 
 ### Added
 
-- `deploy` 脚本串上 `db:migrate`：首次 `wrangler deploy` 自动开通 D1 后立刻建表，
-  不再需要手工迁移（本地会问一次 y/N——`d1 migrations apply` 没有 `--yes` 标志，
-  非交互环境才自动跳过）
-- 新错误码 `STORAGE_UNAVAILABLE`（503）：D1 失败时沿 `cause` 链透传原始错误文本，
+- **表结构改由 Worker 代码自举**（`src/core/bootstrap.ts` 的 `ensureSchema`）：
+  挂在请求中间件、cron 和 `/healthz` 三个触发点上，检测到缺表就把 schema 装好。
+  部署后第一个请求即建表，不再需要任何手工迁移步骤
+- 自举只自动应用**幂等**迁移：`0001_init.sql` 全是 `CREATE ... IF NOT EXISTS`
+  可以自动跑；`ALTER TABLE ADD COLUMN` 之类标 `idempotent: false` 后**一律**拒绝
+  自动执行（条件不是「没记账」而是「永不自动跑」），仍走 `npm run db:migrate`
+- 自举冷路径做完整契约比对（表 + 列 + 索引），缺表/缺索引就重跑幂等 DDL 补上并
+  **复测**；只缺列时明确拒绝硬补并指路 `npm run db:migrate`——`CREATE TABLE IF NOT EXISTS`
+  对已存在的表是空操作，唯一的补法又是非幂等的
+- 稳态下自举每个 isolate 只查一次 D1（模块级记忆）。没有这层记忆的话中间件会给
+  每个请求加一次查询，一天 10 万请求就是额外 10 万次 D1 查询
+- 自举的 DDL 与迁移记账放在同一个 `DB.batch()` 里（D1 的 batch 是 SQL 事务），
+  中途失败整批回滚，不会留下「表建好了但没记账」的中间态；
+  记账表与 wrangler 共用 `d1_migrations`，`wrangler.jsonc` 显式声明
+  `migrations_table`，两边互相认账
+- `/healthz` 从「表名五连探测」升级为五段串行探针，公开返回完整诊断（无需凭据）：
+  `connect` / `schema`（逐表逐列逐索引比对契约）/ `migrations`（记账与待应用）
+  / `write`（真实插入+删除一行）/ `queue`（producer 绑定 + 消费者 ack 往返），
+  外加 `warnings` 和每段耗时。顶层 `d1` / `schema` 保留，旧监控脚本不用改
+- 队列探针用 `gate` 表的哨兵行做往返：`next_at` 正数 = 本轮已发待确认，
+  负数 = 消费者已确认。消费端用 CAS 回写，迟到的消息不会盖掉更新一轮的标记；
+  回写失败时 retry 而不是 ack，避免残留状态误报「消费者没工作」。
+  写探针用独立的键，否则它会在队列探针读 ack 状态之前把记录抹掉
+- `/status` 增加 `schema` 区块：补上 `gate`/`stats`/`settings` 只进 Workers Logs
+  的盲区，直接列出缺哪张表、哪一列、哪个索引、哪些迁移待应用。
+  该区块不跑队列探针——那页面是给人排障打开看的，每看一次就发一条队列消息
+- 部署文档：说明代码自举的三个触发点、幂等守卫、记账表一致性，
+  Workers Builds 的 Deploy command 因此可以简化为 `npx wrangler deploy`
+- 错误码 `STORAGE_UNAVAILABLE`（503）：D1 失败时沿 `cause` 链透传原始错误文本，
   典型形如 `D1_ERROR: no such table: cache`（顶层 `message` 在生产环境只有 `D1_ERROR`，
   真正原因都在 cause 上）
-- `/healthz` 增加 `schema` 字段：探测 `cache/settings/quota/stats/gate` 五张表是否存在。
-  原来的 `SELECT 1` 不碰任何表，迁移没跑它照样 200
 - `/status` 增加 `degraded` 数组：各 D1 区块独立降级，缺表时整页不再 500
 - `/status` 的 `providers[].credits_error` / `channels[].credits_error`：
   读不到额度时给出原始错误，而不是回落成 `used: 0`
@@ -35,8 +58,11 @@
   补 `setting_fallback` / `settings_read_failed` / `stats_read_failed` /
   `gate_note_failed` 计数器，故障不再无声
 - `NO_MATCH` 标注为预留码，不再在文档里宣传一个不会返回的错误码
-- 部署文档：删掉已被 wrangler 4.102 修好的 `missing a database_id` 绕行说明，
-  Workers Builds 面板的 Deploy command 补上迁移步骤
+- 部署文档：核对自动开通链路（4.45.0 起默认开启；4.102.0 / PR #14275 修好按名寻址）
+  并修正三处——补上「本地 `wrangler deploy` 会把真实 `database_id` 写回 `wrangler.jsonc`」
+  及项目约定（首次部署后 `git checkout -- wrangler.jsonc` 退回，保持不写 ID）；解释本项目
+  「先部署后迁移」与官方 deploy-button 示例相反的原因；速查表 `missing a database_id`
+  一行从「升级 wrangler」改成真实成因「远端还没建库」
 
 ### Changed
 
@@ -44,6 +70,8 @@
 - `getSetting` 保留代码默认值兜底（不随其它 D1 读取一起改成上抛）：
   它被限流中间件和 T1 命中路径调用，上抛会把存储故障放大成全站不可用。
   故障本身由 `setting_fallback` 计数器和 `/status` 暴露
+- 队列探针**不**走 `enqueueRefresh`：那条路开头就扣队列额度、且会被软上限挡掉，
+  健康探针不该消耗生产额度。改为直接调 `REFRESH.send`
 
 ## [0.1.0] - 2026-09-27
 

@@ -459,6 +459,13 @@ describe('元数据端点', () => {
       status: string
       d1: boolean
       schema: boolean
+      checks: {
+        schema: { diff: { missingTables: string[]; missingColumns: Record<string, string[]> } }
+        migrations: { pending: string[] }
+        write: { ok: boolean }
+        queue: { ok: boolean; acked: boolean | null }
+      }
+      warnings: string[]
     }
     // 测试环境跑的是 test/apply-migrations.ts，5 张表都在，
     // 所以 schema 探测必须为 true——迁移没跑时 healthz 不会假装健康
@@ -466,11 +473,24 @@ describe('元数据端点', () => {
     expect(health.status).toBe('ok')
     expect(health.d1).toBe(true)
     expect(health.schema).toBe(true)
+    // 迁移齐全时不该有待应用项，五个探针全过，且没有告警
+    expect(health.checks.migrations.pending).toEqual([])
+    expect(health.checks.schema.diff.missingTables).toEqual([])
+    expect(health.checks.write.ok).toBe(true)
+    expect(health.checks.queue.ok).toBe(true)
+    expect(health.warnings).toEqual([])
     const body = (await (await call('/status')).json()) as {
       providers: { name: string; status: string; auth_required?: boolean; auth_optional?: boolean }[]
       free_tier_budget: Record<string, number>
       degraded: string[]
+      schema: { ok: boolean; migrations_pending: string[] }
+      gate: { provider: string }[]
     }
+    // /status 里的 schema 区块补上了只进 Workers Logs 的盲区
+    expect(body.schema.ok).toBe(true)
+    expect(body.schema.migrations_pending).toEqual([])
+    // 队列探针的哨兵行不能出现在闸门列表里
+    expect(body.gate.map((row) => row.provider)).not.toContain('__healthz_probe__')
     // 迁移齐全时不该有任何区块降级
     expect(body.degraded).toEqual([])
     expect(body.providers.map((p) => p.name).sort()).toEqual([

@@ -11,6 +11,7 @@ import { enqueueRefresh, handleQueueBatch } from './core/queue'
 import { encodeTarget } from './core/target'
 import { getIntSetting, getSetting, putSettings } from './core/settings'
 import { bumpStat } from './core/stats'
+import { ensureSchema } from './core/bootstrap'
 import v1 from './routes/v1'
 import meta from './routes/meta'
 import admin from './routes/admin'
@@ -25,6 +26,18 @@ const app = new Hono<AppEnv>()
 app.use('*', requestId())
 app.use('*', cors())
 app.use('*', rateLimit())
+// schema 缺失时自动安装。稳态下每个 isolate 只查一次 D1（完整契约比对），
+// 之后走模块级记忆直接返回。waitUntil 而非 await：安装是修复动作，
+// 不该让第一个真实请求替它买单；失败也不阻断，让请求照常走
+// STORAGE_UNAVAILABLE 路径——那才是准确的错误语义。
+app.use('*', async (c, next) => {
+  c.executionCtx.waitUntil(
+    ensureSchema(c.env).catch((error) => {
+      logError({ event: 'schema_bootstrap_failed', message: rawErrorText(error) })
+    }),
+  )
+  await next()
+})
 
 app.route('/', v1)
 app.route('/', meta)
@@ -117,8 +130,21 @@ export default {
     env: Env,
     ctx: ExecutionContext,
   ): Promise<void> {
+    // cron 兜底：保证「部署后长时间无真实流量」时 schema 也会装好
     ctx.waitUntil(
-      controller.cron === CRON_WARM ? warm(env) : prune(env),
+      ensureSchema(env)
+        .then((result) => {
+          if (result.applied.length > 0) {
+            logError({ event: 'schema_bootstrapped', applied: result.applied })
+          }
+          if (result.refused.length > 0) {
+            logError({ event: 'schema_bootstrap_refused', migrations: result.refused })
+          }
+          return controller.cron === CRON_WARM ? warm(env) : prune(env)
+        })
+        .catch((error) => {
+          logError({ event: 'schema_bootstrap_failed', message: rawErrorText(error) })
+        }),
     )
   },
 }

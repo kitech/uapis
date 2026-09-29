@@ -34,24 +34,38 @@ Worker 体积上限 64 MiB，本项目 gzip 后 57 KiB，余量充足。
   {
     "binding": "DB",
     "database_name": "uapis",
+    "migrations_table": "d1_migrations",
     "migrations_dir": "migrations",
     "migrations_pattern": "migrations/[0-9]*.sql"
   }
 ]
 ```
 
-wrangler ≥4.45 的**自动资源开通**（automatic resource provisioning）看到「有 `database_name`
+wrangler ≥4.45.0 的**自动资源开通**（automatic resource provisioning）看到「有 `database_name`
 但没有 ID」就会在首次 `wrangler deploy` 时调 API 把库建出来，所以这步不需要手工操作。
 
 > **别拿占位符代替缺失。** 自动开通只在 `database_id` 这个键**整个不存在**时触发。
 > 曾经这里写的是 32 个 0，而 wrangler 判定「有没有 UUID」的实现是
-> `!!db?.uuid`（`cli.js` 的 `hasUuid`）——非空字符串就算有。于是 32 个 0 会**短路掉**
-> 自动开通分支，被当成一个合法但存在的 ID 直接送去 API，然后报
+> `!!db?.uuid`（据 wrangler 4.x 打包产物反推的 `hasUuid`，非官方承诺）——非空字符串就算有。
+> 于是 32 个 0 会**短路掉**自动开通分支，被当成一个合法但存在的 ID 直接送去 API，然后报
 > `D1 binding 'DB' references database '000…' which was not found. [code: 10181]`。
 > 要么留空，要么删掉整个键，别填垃圾值。
+>
+> 4.102.0 的按名回退**救不了这个 case**：它只在 wrangler 认为「没有 ID」时才去查 API，
+> 而 `000…0` 恰好被判定为「有 ID」，两条路径都绕开，只能手工纠正。
 
 **Workers Builds 不会把生成的 ID 写回仓库。** Cloudflare 官方文档原话：这种「从面板/GitHub
 发起的部署」资源会被创建，但「ID 只能从 dashboard 看到，不会写回你的仓库」。
+
+> **本地首次部署会把 ID 写回文件。** 从命令行跑 `wrangler deploy` 时官方文档明写
+> 「their IDs will be written back to your configuration file」，真实的 `database_id` 会被
+> 注入磁盘上的 `wrangler.jsonc`。所以第一次 `npm run deploy` 之后 `git status` 会多出这个文件。
+>
+> **本项目的处置：`git checkout -- wrangler.jsonc` 把它退掉。** 保持「故意不写 ID」的设计：
+> 4.102.0 起所有远程 `d1` 子命令（`migrations apply` / `migrations list` / `execute` /
+> `export` / `time-travel`）都走 API 按 `database_name` 回退查找，迁移不依赖这个 ID，
+> 资源在后续部署之间也保持绑定。附带好处是 fork 出去的副本不会带着原账号的 UUID。
+> 代价只是每次 `db:migrate` 多一次 API 查询。
 
 想改成手工管库也可以（也就是老做法）：
 
@@ -81,36 +95,77 @@ D1 能自动开通、队列不能，原因是配置里**写了队列的具名**�
 自动开通的命名规则是 `<worker 名>-<binding 名>`，没具名的话会生成一个叫 `uapis-REFRESH`
 的队列——和这里要用的 `uapis-refresh` 是两个东西，绑定照样对不上。
 
-### 步骤 3 · 迁移表结构
+### 步骤 3 · 表结构由 Worker 代码自举
 
-> **自动开通路线下，`npm run deploy` 已经把这一步带上了**（`deploy` 脚本 =
-> `build:docs && wrangler deploy && npm run db:migrate`）。之所以能这么排，是因为库由
-> `wrangler deploy` 顺带建出来，迁移必须在它之后。
+`wrangler deploy` 只保证**库存在**，不保证**表存在**。所以本项目不靠手工迁移起步：
+Worker 里有一段 `ensureSchema()`（`src/core/bootstrap.ts`），在检测到表缺失时把 schema 装上。
+
+它挂在三个触发点上，任一即可完成安装：
+
+| 触发点 | 位置 | 为什么需要它 |
+| --- | --- | --- |
+| 每个请求 | `index.ts` 中间件，`waitUntil` | 正常流量下第一次请求就装好 |
+| 每次 cron | `index.ts` `scheduled` | 部署后长时间没流量时兜底 |
+| `/healthz` | `meta.ts`，`waitUntil` | 监控一定会轮询它，真实流量可能为零 |
+
+**不需要任何手工步骤。** `wrangler deploy` 之后，第一次请求（含 `/healthz`）就会建表，
+业务端点立刻可用。
+
+冷路径上一次查询拿全库结构（`sqlite_master` + `pragma_table_info`）并与
+`src/core/schema-contract.ts` 的契约逐表逐列逐索引比对，结论有三种：
+
+| 契约状态 | 自举行为 |
+| --- | --- |
+| 完整 | 记进 isolate 记忆，本 isolate 内后续请求零查询 |
+| 缺表 / 缺索引 | 重跑幂等 DDL 补上（这正是修复动作），补完复测 |
+| 只缺列 | **不硬补**。`CREATE TABLE IF NOT EXISTS` 对已存在的表是空操作，唯一的补法 `ALTER TABLE ADD COLUMN` 又是非幂等的。结论是「需要真的迁移」，报出来并指路 `npm run db:migrate` |
+
+补上之后会**重新比对**再决定是否记进记忆，而不是假定「跑过 DDL 就一定好了」——
+缺表和缺列可能同时存在。
+
+> **为什么幂等迁移不查 `d1_migrations` 就重跑。** 直觉上该跳过「已应用」的迁移，
+> 但那样就修不了漂移：记账说「跑过了」，而表被手工删掉或半截安装时，DDL 再也不会
+> 执行，缺口永远补不上。能走到这个分支说明契约已经不完整，而幂等 DDL 重跑本身
+> 就是安全且正是「修复」所需的动作。记账用 `INSERT OR IGNORE`，不会产生重复行。
+
+> **记账表与 wrangler 共用 `d1_migrations`。** `ensureSchema` 建表时用的 DDL 与
+> wrangler `getCreateMigrationsTableQuery` 逐字一致，且 `name` 存相对
+> `migrations_dir` 的路径（`0001_init.sql`，不是 `migrations/0001_init.sql`）。
+> 两边因此能互相认账：自举记过的迁移，之后跑 `npm run db:migrate` 不会重复执行。
+> `wrangler.jsonc` 里也显式写了 `"migrations_table": "d1_migrations"`。
 >
-> 本地跑 `npm run deploy` 时 wrangler 会问一次 `y/N`（`d1 migrations apply` 没有
-> `--yes` 标志，非交互环境才自动跳过）；`npm run deploy:dry` 不含迁移。
+> 记账表**先单独建好再查**：空库上此刻它还不存在，直接 `SELECT` 会抛
+> `no such table: d1_migrations`，整个自举挂在第一次查询上，永远装不上。
 >
-> 完整顺序：建队列 → `npm run deploy`（内含迁移）→ 配 `ADMIN_TOKEN`。
-> 走手工建库路径（步骤 1 的备选）则不受此限，可以维持「先迁移后部署」。
+> **`npm run db:migrate` 仍然保留**，它是**非幂等迁移的唯一通道**（见下）。
 
-```bash
-npm run db:migrate
-```
+**只自动应用幂等迁移。** 每个迁移在 `MIGRATIONS` 里显式标 `idempotent`：
 
-建 5 张表（`cache` / `settings` / `quota` / `stats` / `gate`）。
+- `0001_init.sql` 全部是 `CREATE TABLE/INDEX IF NOT EXISTS` → `idempotent: true`，可自动应用；
+- 未来的 `ALTER TABLE ADD COLUMN` 之类 → 必须标 `false`，自举会拒绝执行并记
+  `schema_bootstrap_refused` 日志，这类迁移只能走 `npm run db:migrate`。
 
-脚本里写的是 `wrangler d1 migrations apply DB`——**`DB` 是 binding 不是库名**，
-wrangler 的 `<database>` 位置参数同时接受两者。这样改 `database_name` 或换
-`database_id` 都不用动脚本；而真要改 binding，`env.DB` 的类型和 `typecheck` 会先拦下来。
+> **这个标记只存在于代码里，SQL 里没有。** 加新迁移文件时必须同步登记进
+> `MIGRATIONS` 并显式填 `idempotent`；漏登记会被 `EXPECTED_MIGRATIONS` 的
+> 一致性测试（`test/schema-contract.test.ts`）拦下。
+>
+> **自举的 DDL 是 `src/core/schema-ddl.ts` 里的内联常量，不是 `.sql` 导入。**
+> `import sql from './x.sql'` 依赖 wrangler 默认 module rules 把 `.sql` 当 Text
+> 加载（4.x 才有），属隐式打包器契约，换打包器会在构建期炸成
+> "No loader is configured"。同一个测试文件会断言内联常量与
+> `migrations/0001_init.sql` 归一化后逐条相等，漂移由测试拦住。
 
-> 顺带一提，官方文档其实**建议迁移用库名而非 binding**，理由是
-> 「binding 名可能会改，而库名不会」（D1 不支持重命名，想改只能导数据重建）。
-> 本项目两者目前都叫 `uapis`/`DB` 且不会动，暂时用 binding 没问题；
-> 将来要分 staging 环境、binding 改名时记得换成 `wrangler d1 migrations apply uapis`。
+库名 vs binding：官方文档建议迁移用**库名**而非 binding（binding 名可能会改，库名不会）。
+本项目 `db:migrate` 脚本目前写的是 binding `DB`——wrangler 的 `<database>` 位置参数
+同时接受两者，两者都不会变动时等价。将来要分 staging 环境或改 binding 名时，
+换成 `wrangler d1 migrations apply uapis`。
 
-> **`missing a database_id` 在 wrangler ≥ 4.102 已经修好**（release #14275：远程
-> 子命令的按名寻址改走 API 解析）。本项目锁 4.141，不再需要这条绕行。
-> 万一还是报，按步骤 1 的手工路径 `npx wrangler d1 create uapis` 拿 UUID、
+> **`missing a database_id` 在 wrangler ≥ 4.102.0 已经修好**（PR #14275，commit `594544d`：
+> 远程子命令的按名寻址改走 `GET /accounts/:accountId/d1/database/:name?fields=uuid`
+> 解析，覆盖 `migrations apply` / `migrations list` / `execute` / `export` / `time-travel`）。
+> 本项目锁 4.141.0，已包含该修复。**注意它是远程 API 查询**，所以库必须先由
+> `wrangler deploy` 建出来。
+> 万一还是失败，按步骤 1 的手工路径 `npx wrangler d1 create uapis` 拿 UUID、
 > 填进 `wrangler.jsonc`、提交即可。
 
 **seed 不会跟着迁移跑。** `migrations/seed.sql` 和真正的迁移同住一个目录，而
@@ -123,9 +178,11 @@ wrangler 的 `<database>` 位置参数同时接受两者。这样改 `database_n
 全部回落到 `src/core/settings.ts` 的代码默认值——这本来就是设计意图。
 需要本地数据时手工跑 `npm run db:seed:local`，凭据一律走 `PUT /admin/settings`。
 
+> 注意 seed 也**不在**自举范围内：自举只应用 `MIGRATIONS` 登记的编号迁移，
+> 读不到 `seed.sql`。
+
 迁移的通用纪律与库怎么建无关：后续 schema 变更走**加法式**（加列、加表）先行；
-破坏性变更放部署之后并立刻验证——`wrangler d1 migrations apply` 自己就会提示
-"迁移期间数据库可能短暂不可用"。
+破坏性变更放部署之后并立刻验证。
 
 ### 步骤 3b · 选填：写死 account_id
 
@@ -148,8 +205,11 @@ Cloudflare 注入，不用管。只有名下有多个账号、且想免掉每次
 npm run deploy
 ```
 
-**首次部署时，这一步同时把 D1 库开出来**（见步骤 1），并紧接着执行步骤 3 的迁移。
-所以自动开通路线下不需要任何手工的迁移步骤。
+**首次部署时，这一步同时把 D1 库开出来**（见步骤 1）。表结构由 Worker 代码在
+第一个请求时自举装好（见步骤 3），所以自动开通路线下不需要任何手工的迁移步骤。
+
+> 这一步之后 `wrangler.jsonc` 会被 wrangler 写入真实 `database_id`（见步骤 1），
+> 按项目约定 `git checkout -- wrangler.jsonc` 退掉，保持不写 ID。
 
 **不要裸跑 `wrangler deploy`。** `wrangler.jsonc` 里 `assets.directory` 指向 `.assets`，
 而该目录已被 gitignore（`.gitignore` 第 3 行）——它是构建产物，由 `npm run build:docs`
@@ -171,14 +231,14 @@ configuration file does not exist: /path/to/repo/.assets
 | 字段 | 值 |
 | --- | --- |
 | Build command | `npm run build:docs` |
-| Deploy command | `npx wrangler deploy && npx wrangler d1 migrations apply DB --remote` |
+| Deploy command | `npx wrangler deploy` |
 
 Build command 留空是最常见的踩法：面板只跑 `wrangler deploy`，`.assets` 没人生成，
 于是每一条构建都在上面那个报错上挂掉。仓库里**没有** `build` 这个 script
 （只有 `build:docs`），所以别填 `npm run build`。
 
-Deploy command 那一段就是步骤 3 + 步骤 4 串起来（对应 `npm run deploy` 的后两段）。
-省掉它的话面板部署同样不会建表，只能看到 `503 STORAGE_UNAVAILABLE: no such table`。
+Deploy command 那一段就是步骤 4（对应 `npm run deploy` 的第二段）。
+表结构不靠它——Worker 自己会装（步骤 3），省掉它也能建表。
 构建容器是非交互环境，`d1 migrations apply` 的确认提示会自动跳过。
 
 Build command 填了 `build:docs` 的情况下**不要**再把 Deploy command 填成
@@ -236,7 +296,8 @@ curl -X PUT https://api.你的域名/admin/settings \
 ```bash
 BASE=https://api.你的域名
 
-# 1. D1 绑定能执行查询，且 5 张表都建好了（schema 为 true 才算迁移到位）
+# 1. D1 绑定能执行查询，且 schema 完整（缺表时首次调用会触发自举，
+#    所以这一次可能仍是 degraded，再调一次就应该是 ok）
 curl -s $BASE/healthz
 
 # 2. /status 读 cache/settings/quota/stats/gate 五张表。
@@ -283,8 +344,9 @@ curl -si $BASE/admin/settings | head -1
 | `settings` | `getSetting` | 静默回落代码默认值（计数器 `setting_fallback`）|
 | `stats` | `readStats` | 静默返回空数组（计数器 `stats_read_failed`）|
 
-迁移漏跑的特征：`/healthz` 的 `schema: false`（503），`/status` 顶部 `degraded`
-非空。别把「能打开」当成「迁移好了」——`/healthz` 现在会做真正的表探测。
+迁移没跑的特征：`/healthz` 的 `schema: false`（503），`/status` 顶部 `degraded`
+非空。自举会自动补上，所以在补上之前会看到这两者；补上后再调就是全绿。
+`/healthz` 的 `checks.schema.diff` 会直接给出缺哪张表、哪一列、哪个索引。
 
 ## 第二部分 · 日常运维
 
@@ -419,10 +481,13 @@ Cron 的清理批量也别加大。
 | --- | --- | --- |
 | `Queue "uapis-refresh" does not exist` | 跳了步骤 2 | `npx wrangler queues create uapis-refresh` |
 | `D1 binding 'DB' references database '000…' which was not found. [code: 10181]` | `database_id` 填了占位符 | 删掉 `database_id` 整个键（自动开通），或填真实 UUID |
-| `missing a database_id`（跑 `db:migrate` 时）| wrangler < 4.102 的按名寻址缺陷 | 升级 wrangler；或 `npx wrangler d1 create uapis` 后填回 UUID |
-| `503 STORAGE_UNAVAILABLE`，message 含 `no such table: xxx` | 迁移没跑，或打到了别的库 | `npm run db:migrate` |
-| `/healthz` 返回 `schema: false` | 5 张表没建齐 | `npm run db:migrate` |
-| `The directory specified by the "assets.directory" field ... does not exist: .../.assets` | 裸跑了 `wrangler deploy`，或 Workers Builds 的 Build command 留空 | 本地 `npm run deploy`；面板 Build command 填 `npm run build:docs` |
+| 跑 `db:migrate` 报库找不到 | 远端还没建出这个库：没跑过 `wrangler deploy` | 先 `wrangler deploy`（自动开通），再 `npm run db:migrate` |
+| `missing a database_id`（仅 wrangler < 4.102.0 会遇到） | 按名寻址缺陷，PR #14275 已修 | 升级 wrangler 到 ≥ 4.102.0 |
+| `503 STORAGE_UNAVAILABLE`，message 含 `no such table: xxx` | 自举还没跑完，或打到了别的库 | 再调一次触发自举；持续出现看 `checks.schema.diff` |
+| `/healthz` 持续 `schema: false` | 自举失败，DDL 被拒或 D1 不可用 | 看 Workers Logs 的 `schema_bootstrap_failed` / `schema_bootstrap_refused` |
+| `/healthz` 出现 `migrations_pending` 非空 | 有迁移被标为非幂等、自举拒绝自动应用 | 走 `npm run db:migrate`（非幂等迁移的唯一通道） |
+| `/healthz` 的 `warnings` 含 `queue-consumer` | 队列消费者没在 10 分钟内确认探针 | 检查 queue consumer 绑定与 `max_retries` |
+| The directory specified by the "assets.directory" field ... does not exist: .../.assets | 裸跑了 `wrangler deploy`，或 Workers Builds 的 Build command 留空 | 本地 `npm run deploy`；面板 Build command 填 `npm run build:docs` |
 | UA 是全局固定的 `uapis/0.1.0 (+apple.com)`，不随访问域名变化 | 不是故障 | 无需处理 |
 | `/admin/*` 一直 503 | 没设 `ADMIN_TOKEN` secret | `npx wrangler secret put ADMIN_TOKEN` |
 | 改了 `wrangler.jsonc` 后 typecheck 报 `Env` 缺绑定 | 绑定变了 | `npm run cf:typegen` 然后 `npm run typecheck` |

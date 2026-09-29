@@ -17,6 +17,7 @@
     {
       "binding": "DB",
       "database_name": "uapis",
+      "migrations_table": "d1_migrations",
       "migrations_dir": "migrations",
       "migrations_pattern": "migrations/[0-9]*.sql"
     }

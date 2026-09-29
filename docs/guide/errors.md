@@ -50,16 +50,53 @@
    - `NEGATIVE` → 上游之前失败过，6 小时内不再回源，等 TTL 或 `POST /admin/rebuild`
    - `QUEUED` → 内联回源关着，或者在队列额度里
 3. `/status` 看 `gate`（哪个 provider 冷却中）、`queue.used`、`cache.rows`、
-   `providers[].configured`。
+   `providers[].configured`，以及 `schema` 区块（缺表/缺列直接列名字）。
 4. `X-RateLimit-Remaining: 0` 就是入口限流，不是上游问题。
 
 ## 常见问题
 
 **`503 STORAGE_UNAVAILABLE`，message 里是 `no such table: xxx`？**
-数据库存在但表没建。最常见的原因是首次部署漏了迁移——`wrangler deploy` 会自动开通
-D1，但不会自动建表。跑 `npm run db:migrate`（`npm run deploy` 现在已经自动带上这一步，
-只在「部署成功但迁移没跟上」时才需要手工补）。
-`/healthz` 的 `schema` 字段会提前告诉你这件事：`schema: false` 就是没建齐。
+数据库存在但表没建。`wrangler deploy` 只自动开通 D1，**不建表**。
+本项目的 Worker 会自己补：请求中间件、cron 和 `/healthz` 三处都会在检测到缺表时
+跑 `ensureSchema()`（`src/core/bootstrap.ts`），所以多数情况下重试一次就恢复。
+仍然报错说明自举失败，去 Workers Logs 找 `schema_bootstrap_failed`
+（D1 不可用）或 `schema_bootstrap_refused`（有迁移被标为非幂等、拒绝自动执行）。
+后者要手工走 `npm run db:migrate`。
+
+**`/healthz` 的五段探针怎么读？**
+`/healthz` 公开返回完整诊断，不需要任何凭据：
+
+| 字段 | 含义 | 影响 503？ |
+| --- | --- | --- |
+| `d1` | 能不能执行查询 | 是 |
+| `schema` | 表、列、索引是否与契约一致 | 是 |
+| `checks.connect` | D1 连通性 | 是 |
+| `checks.schema.diff` | 缺哪张表 / 哪一列 / 哪个索引 | 是 |
+| `checks.migrations.pending` | 有迁移没记账 | 是 |
+| `checks.write` | 真实写权限（插入+删除一行） | 是 |
+| `checks.queue` | producer 绑定 + 消费者是否确认过探针 | **否** |
+| `warnings` | 非致命降级 | 否 |
+
+三点值得单独记：
+
+- **只看表名不够。** `0001_init.sql` 全是 `CREATE ... IF NOT EXISTS`，改过已应用的
+  迁移再重跑，wrangler 认为「无待应用迁移」，表名齐全但列对不上。所以探针逐列比对
+  `src/core/schema-contract.ts` 里的契约。
+- **D1 不可用不会被误报成 schema 不全。** 连接探针和 schema 探针分开判定：
+  前者失败时后者标 `skipped: connect failed`，`diff` 是空的。
+- **队列坏了不会让 `/healthz` 503。** 绑定缺失或消费者停摆只进 `warnings`
+  （分别是 `queue` 和 `queue-consumer`），因为站点其余功能仍完全可用，而外部平台
+  常拿 `/healthz` 当存活探针。消费者真停摆时，第一次真实入队会以
+  `503 SERVICE_UNAVAILABLE` + `X-Queue: unavailable` 立刻暴露。
+
+**`checks.queue.acked` 的三态**：行不存在 = 从未探测过（`null`）；`next_at` 为正 =
+发出后没人确认（`false`，进 warnings）；为负 = 消费者已确认（`true`）。
+消费端用 CAS 回写（`WHERE next_at = 本轮时间戳`），所以迟到的消息不会把更新一轮的
+标记盖掉。超过 10 分钟没人轮询一律回落 `null`——那是「没人在看」，不是「消费者死了」。
+
+`/status` 里也有一个 `schema` 区块，给出同样的结论，但**不跑队列探针**
+（那会每看一次页面就发一条队列消息）。它补的是 `gate`/`stats`/`settings` 的盲区：
+这三者的原始错误只进 Workers Logs，不经过响应体。
 
 **额度看起来一直在涨，但 D1 明明挂了？**
 不会了。`consumeCredits` / `consumeQueueSlot` / `readRow` 以前在 D1 故障时分别返回
@@ -73,9 +110,11 @@ D1，但不会自动建表。跑 `npm run db:migrate`（`npm run deploy` 现在�
 静默 `allowed: true`——那正是以前会烧穿额度的地方。
 
 **`/status` 顶部 `degraded` 非空说明什么？**
-某个区块读 D1 失败了（`quota` / `gate` / `queue` / `cache` / `credits:<provider>`），
-对应字段已回落中性值，`/status` 本身不会因为它 500。`settings` 和 `stats` 的降级
-不写进 `degraded`，它们分别由 `setting_fallback` / `stats_read_failed` 计数器暴露。
+某个区块读 D1 失败了（`quota` / `gate` / `queue` / `cache` / `schema` /
+`credits:<provider>`），对应字段已回落中性值，`/status` 本身不会因为它 500。
+`settings` 和 `stats` 的降级不写进 `degraded`，它们分别由 `setting_fallback` /
+`stats_read_failed` 计数器暴露——现在 `schema` 区块补上了这个盲区，
+缺哪张表会直接列出来。
 
 **为什么队列坏了是 `SERVICE_UNAVAILABLE` 而不是 `QUOTA_EXHAUSTED`？**
 两者是完全不同的故障：前者是队列 send 失败（`X-Queue: unavailable`），
