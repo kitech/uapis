@@ -6,6 +6,7 @@ import { buildOpenApi } from '../core/openapi'
 import { cacheRowCount } from '../core/cache'
 import { countersSnapshot, loggerState } from '../core/logger'
 import { getIntSetting, getSetting } from '../core/settings'
+import { siteUrlOf } from '../core/site'
 import { queueBudget, readAllQuota, readCredits } from '../core/credits'
 import { readGate } from '../core/gate'
 import { readStats } from '../core/stats'
@@ -14,7 +15,7 @@ import type { ProxyChannel } from '../core/fetcher'
 const meta = new Hono<AppEnv>()
 
 meta.get('/openapi.json', (c) => {
-  const siteUrl = (c.env.SITE_URL ?? 'https://uapis.example.workers.dev').replace(/\/+$/, '')
+  const siteUrl = siteUrlOf(c.req)
   return jsonBody(c, buildOpenApi(siteUrl), {
     headers: { 'cache-control': 'public, max-age=300' },
   })
@@ -135,7 +136,7 @@ meta.get('/status', async (c) => {
 })
 
 meta.get('/llms.txt', (c) => {
-  const siteUrl = (c.env.SITE_URL ?? '').replace(/\/+$/, '')
+  const siteUrl = siteUrlOf(c.req)
   const lines: string[] = [
     '# uapis',
     '',

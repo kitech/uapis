@@ -160,6 +160,9 @@ P0 骨架 + P1 端点完善 + P2 零 key 源批量接入 + P3 付费代理通道
 
 ### Changed
 
+- **UA 改为全局固定 `uapis/0.1.0 (+apple.com)`，并删除 `vars.SITE_URL`**。原先 UA 尾串
+  和 `/openapi.json`、`/llms.txt` 的链接都从 `SITE_URL` 读，部署第二步"改 SITE_URL 再部署"
+  是改域名后必踩的坑；现在 UA 是常量（cron 预热与用户请求一致），文档链接按当前 Host 自动取
 - **D1 改由 wrangler 自动开通，不再往仓库里塞占位 `database_id`**。原先
   `wrangler.jsonc` 写的是 32 个 0，干净 checkout + CI 每次都会撞上
   `[code: 10181] D1 binding 'DB' references database '000…' which was not found`。
@@ -176,6 +179,8 @@ P0 骨架 + P1 端点完善 + P2 零 key 源批量接入 + P3 付费代理通道
 
 ### Fixed
 
+- **`/llms.txt` 泄漏硬编码示例域名**：`meta.ts` 读 `SITE_URL` 时的默认值就是示例域名，
+  没配过 `SITE_URL` 的部署会对外自报它；现在改为从当前请求 Host 取
 - **凭据设置键统一成「provider 名 + 凭证类型」**：`se.key` → `stackexchange.api_key`、
   `ncbi.api_key` → `pubmed.api_key`、`gh.token` → `github.token`。原先三个键里两个用缩写
   （`se`/`gh`），第三个 `ncbi` 更是按**上游机构**命名，而全项目其余设置键（`crossref.*`、

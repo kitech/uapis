@@ -21,10 +21,11 @@ const BLOCKED_HOSTS = [
   /\.local$/,
 ]
 
-export function userAgent(env: Env): string {
-  const site = (env.SITE_URL ?? '').replace(/\/+$/, '')
-  return `uapis/1.0 (+${site})`
-}
+/**
+ * 固定诚实 UA：`应用名/版本 (+附加域名)`，附加域名固定 apple.com，
+ * 与访问域名无关，cron 预热与用户请求一致。
+ */
+export const USER_AGENT = 'uapis/0.1.0 (+apple.com)'
 
 /** 唯一的上游出口：https + 固定 host 白名单 + 强制 UA */
 export async function assertAllowedUpstream(env: Env, raw: string): Promise<URL> {
@@ -82,7 +83,7 @@ export async function fetchUpstream(
   const retries = request.retries ?? 1
   const timeoutMs = request.timeoutMs ?? DEFAULT_TIMEOUT_MS
   const headers = new Headers(request.headers ?? {})
-  headers.set('user-agent', userAgent(env))
+  headers.set('user-agent', USER_AGENT)
   if (!headers.has('accept')) headers.set('accept', '*/*')
   if (!headers.has('accept-language')) headers.set('accept-language', 'en')
 

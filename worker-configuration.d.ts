@@ -5,7 +5,6 @@ interface __BaseEnv_Env {
 	DB: D1Database;
 	REFRESH: Queue;
 	SITE_NAME: "uapis";
-	SITE_URL: "https://uapis.example.workers.dev";
 }
 declare namespace Cloudflare {
 	interface GlobalProps {

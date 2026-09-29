@@ -283,7 +283,7 @@ curl "https://<你的域名>/api/v1/github/android/rising?since=2026-08-28&per_p
 ## crates.io · tier A-
 
 上游：`https://crates.io/api/v1`，**零 key**（上游要求带可识别的 User-Agent，
-本项目发 `uapis/1.0 (+SITE_URL)`）。
+本项目发 `uapis/0.1.0 (+apple.com)`）。
 
 | 方法 | 路径 | 参数 |
 | --- | --- | --- |
@@ -326,7 +326,7 @@ curl "https://<你的域名>/api/v1/github/android/rising?since=2026-08-28&per_p
 ## MusicBrainz · tier A-
 
 上游：`https://musicbrainz.org/ws/2`，**零 key**（上游要求带可识别的 User-Agent，
-本项目发 `uapis/1.0 (+SITE_URL)`）。
+本项目发 `uapis/0.1.0 (+apple.com)`）。
 
 | 方法 | 路径 | 参数 |
 | --- | --- | --- |

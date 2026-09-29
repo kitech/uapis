@@ -198,7 +198,7 @@
 ### crates · tier A- ✅
 
 - 上游：`https://crates.io/api/v1`
-- 凭据：零 key，但**要求可识别的 User-Agent**（本项目发 `uapis/1.0 (+SITE_URL)`）；
+- 凭据：零 key，但**要求可识别的 User-Agent**（本项目发 `uapis/0.1.0 (+apple.com)`）；
   数据访问文档 <https://crates.io/data-access>、站点条款 <https://crates.io/policies>
 - 端点：`crate/{name}`（**transform**）、`crate/{name}/{version}`（透传，1.7KB）、
   `search`（透传，2.1KB）

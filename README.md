@@ -63,7 +63,7 @@ npm run deploy:dry                  # 构建文档并 dry-run，产物需 < 64Mi
 别裸跑 `wrangler deploy`：`.assets/` 是 gitignore 的构建产物，缺失时 wrangler 会直接
 报错终止整个部署；用 Workers Builds 自动部署时 Build command 要填 `npm run build:docs`）→
 `npm run db:migrate`（建 5 张表）→ `npx wrangler secret put ADMIN_TOKEN`
-→ 绑自定义域名后改 `vars.SITE_URL` 再部署一次。
+→ 绑自定义域名后重新 `npm run deploy` 一次。
 
 日常运维（回滚范围、Time Travel、只读模式、额度监控、部署失败速查）也在同一页。
 

@@ -72,7 +72,7 @@ export const def: ProviderDef = {
   tier: 'A-',
   hosts: ['musicbrainz.org'],
   minIntervalMs: 1000,
-  uaNote: '官方 web service，零 key；上游要求带可识别的 User-Agent（本项目发 uapis/1.0 (+SITE_URL)）',
+  uaNote: '官方 web service，零 key；上游要求带可识别的 User-Agent（本项目发 uapis/0.1.0 (+apple.com)）',
   parseCostMs: 0,
   attribution: '音乐元数据（艺人名、发行信息、封面）版权归各权利人，MusicBrainz 只做开放元数据索引',
   tos: 'https://musicbrainz.org/doc/MusicBrainzAPI/About/Terms%20of%20Use',

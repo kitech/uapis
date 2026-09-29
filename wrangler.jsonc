@@ -49,7 +49,6 @@
   //   "subrequests": 40
   // },
   "vars": {
-    "SITE_NAME": "uapis",
-    "SITE_URL": "https://uapis.example.workers.dev"
+    "SITE_NAME": "uapis"
   }
 }

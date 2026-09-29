@@ -16,13 +16,14 @@ import {
   validateRegistry,
 } from '../src/core/registry'
 import { buildOpenApi } from '../src/core/openapi'
-import { assertAllowedUpstream, userAgent } from '../src/core/fetcher'
+import { USER_AGENT, assertAllowedUpstream } from '../src/core/fetcher'
 import { consumeCredits, readCredits, resetCredits } from '../src/core/credits'
 import { runtimeFor } from '../src/providers'
 import { parseAtom } from '../src/providers/arxiv'
 import { extractArticle } from '../src/providers/economist'
 import { egressHostsOf, providerByName } from '../src/core/registry'
 import { fetchUpstream, pickChannel } from '../src/core/fetcher'
+import { normalizeOrigin, siteUrlOf } from '../src/core/site'
 
 /** miniflare 的 Cloudflare.Env 缺少 src/types.ts 里声明的 ADMIN_TOKEN，测试里做一次桥接 */
 const env = cloudflareEnv as unknown as Env
@@ -1414,8 +1415,18 @@ describe('P3 付费通道（tier C）', () => {
 })
 
 describe('上游出口', () => {
-  it('UA 带站点 URL 且不可被请求覆盖', () => {
-    expect(userAgent(env)).toBe('uapis/1.0 (+https://test.local)')
+  it('UA 固定为 uapis/0.1.0 (+apple.com)，不可被请求覆盖', () => {
+    expect(USER_AGENT).toBe('uapis/0.1.0 (+apple.com)')
+  })
+
+  it('normalizeOrigin 剥路径、只留协议与 host', () => {
+    expect(normalizeOrigin('https://a.example/x?y=1#z')).toBe('https://a.example')
+    expect(normalizeOrigin('not a url')).toBe('')
+  })
+
+  it('siteUrlOf 从请求 URL 取站点地址，无请求时为空串', () => {
+    expect(siteUrlOf(new Request('https://api.example.com/api/v1'))).toBe('https://api.example.com')
+    expect(siteUrlOf(undefined)).toBe('')
   })
 
   it('白名单内 host 通过', async () => {

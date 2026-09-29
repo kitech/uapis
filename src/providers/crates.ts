@@ -44,7 +44,7 @@ export const def: ProviderDef = {
   tier: 'A-',
   hosts: ['crates.io'],
   minIntervalMs: 1000,
-  uaNote: '官方 API，零 key；上游要求带可识别的 User-Agent（本项目发 uapis/1.0 (+SITE_URL)）',
+  uaNote: '官方 API，零 key；上游要求带可识别的 User-Agent（本项目发 uapis/0.1.0 (+apple.com)）',
   parseCostMs: 1,
   attribution: 'crate 元数据与代码版权归各发布者，crates.io 只做索引与托管',
   tos: 'https://crates.io/policies',

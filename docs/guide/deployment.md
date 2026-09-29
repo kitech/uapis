@@ -192,7 +192,7 @@ npx wrangler secret put ADMIN_TOKEN
 
 两者别混：503 是配置缺失，401 是凭证不对。
 
-### 步骤 6 · 绑自定义域名，然后改 SITE_URL 再部署一次
+### 步骤 6 · 绑自定义域名，然后重新部署
 
 控制台 **Workers & Pages → 你的 Worker → Settings → Domains & Routes → Add → Custom domain**。
 
@@ -201,18 +201,8 @@ npx wrangler secret put ADMIN_TOKEN
 "这个 Worker 就是该 hostname 的源站"，不需要自己加 DNS 记录；这和 route 不同，
 route 要求域名已有被 Cloudflare 代理的 DNS 记录。两者共用同一份 10 万请求/天额度。）
 
-然后改 `wrangler.jsonc` 的 `vars.SITE_URL` 并**重新 `npm run deploy`**：
-
-```jsonc
-"vars": { "SITE_NAME": "uapis", "SITE_URL": "https://api.你的域名" }
-```
-
-`SITE_URL` 有三处实际用途，不是装饰：
-
-1. **上游 UA 尾串**——`uapis/1.0 (+<SITE_URL>)`，这是本项目"诚实 UA"承诺的一部分，
-   改漏了等于对外自称 `uapis.example.workers.dev`
-2. `/openapi.json` 的 `servers`
-3. `/llms.txt` 里每条接口的前缀
+绑完**重新 `npm run deploy`** 即可，无需任何配置改动：`/openapi.json` 的 `servers` 和
+`/llms.txt` 的接口前缀都从当前请求的 Host 自动取；UA 是全局固定的 `uapis/0.1.0 (+apple.com)`。
 
 ### 步骤 7 · 按需配上游凭据
 
@@ -424,7 +414,7 @@ Cron 的清理批量也别加大。
 | `missing a database_id`（跑 `db:migrate` 时）| 靠库名反查 UUID 没兜住（workers-sdk#13632）| `npx wrangler d1 create uapis`，把 UUID 填回配置并提交 |
 | `/healthz` 一直 ok，但 `/status` 500 或 `cache.rows` 恒为 0 | 迁移没跑，或打到了别的库 | `npm run db:migrate`（`/healthz` 的 `SELECT 1` 不碰表，查不出这个问题） |
 | `The directory specified by the "assets.directory" field ... does not exist: .../.assets` | 裸跑了 `wrangler deploy`，或 Workers Builds 的 Build command 留空 | 本地 `npm run deploy`；面板 Build command 填 `npm run build:docs` |
-| 上游 UA 显示 `uapis.example.workers.dev` | 改完域名忘了改 `SITE_URL` | 改 `vars.SITE_URL` 再部署 |
+| UA 是全局固定的 `uapis/0.1.0 (+apple.com)`，不随访问域名变化 | 不是故障 | 无需处理 |
 | `/admin/*` 一直 503 | 没设 `ADMIN_TOKEN` secret | `npx wrangler secret put ADMIN_TOKEN` |
 | 改了 `wrangler.jsonc` 后 typecheck 报 `Env` 缺绑定 | 绑定变了 | `npm run cf:typegen` 然后 `npm run typecheck` |
 | 全站 500 且 `/status` 也打不开 | D1 读写行数触顶 | 等 00:00 UTC，或降 `cache.soft_rows` |

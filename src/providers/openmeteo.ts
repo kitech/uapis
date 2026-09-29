@@ -145,7 +145,7 @@ export const def: ProviderDef = {
   tier: 'A-',
   hosts: ['api.open-meteo.com', 'geocoding-api.open-meteo.com', 'air-quality-api.open-meteo.com'],
   minIntervalMs: 1000,
-  uaNote: '免费 API 零 key，官方未强制 UA 但要求合理使用；本项目发 uapis/1.0 (+SITE_URL)',
+  uaNote: '免费 API 零 key，官方未强制 UA 但要求合理使用；本项目发 uapis/0.1.0 (+apple.com)',
   parseCostMs: 0,
   attribution: '气象与空气质量数据由 Open-Meteo.com 提供，CC BY 4.0',
   tos: 'https://open-meteo.com/en/terms',

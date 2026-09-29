@@ -14,7 +14,6 @@ export default defineConfig(async () => {
           bindings: {
             ADMIN_TOKEN: 'test-admin-token',
             SITE_NAME: 'uapis',
-            SITE_URL: 'https://test.local',
             // 仅测试用：把 migration 注入给 setup 文件
             TEST_MIGRATIONS: migrations,
           },
