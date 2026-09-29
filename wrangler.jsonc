@@ -40,9 +40,14 @@
   "triggers": {
     "crons": ["7 */2 * * *", "*/30 * * * *"]
   },
-  "limits": {
-    "subrequests": 40
-  },
+  // Free 计划不接受任何 limits 声明：只写 subrequests 也会被 API 拒绝，
+  // 报 "CPU limits are not supported for the Free plan" [code: 100328]
+  // 见 cloudflare/workers-sdk#8756。生效值回到计划默认：50 subrequests、10 ms CPU。
+  // 注意 limits 是可继承字段，日后用 --env 时所有 env 段都得保持注释。
+  // 升级 Workers Paid 后可放开：{ "cpu_ms": 30000, "subrequests": 1000 }
+  // "limits": {
+  //   "subrequests": 40
+  // },
   "vars": {
     "SITE_NAME": "uapis",
     "SITE_URL": "https://uapis.example.workers.dev"
