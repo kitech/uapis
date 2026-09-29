@@ -100,6 +100,18 @@ export function isStorageError(error: unknown): boolean {
 }
 
 /**
+ * 只有「这张表不存在」这一个语义。
+ *
+ * 和 isStorageError 刻意分开：那个要抓的是「故障来自 D1」，
+ * 这个要抓的是「这个错误不是故障，是结论」——只有它才能被当成
+ * 「还没迁移」。SQLITE_AUTH、超时、限额都走同一条 catch，
+ * 一并吞掉就会把 D1 故障说成「你忘了跑 db:migrate」。
+ */
+export function isMissingTableError(error: unknown): boolean {
+  return /no such table/i.test(rawErrorText(error))
+}
+
+/**
  * D1 故障的统一出口：503 + 原始错误文本。
  * 刻意不传 retryAfter——不给客户端任何"多久后重试"的指令。
  */

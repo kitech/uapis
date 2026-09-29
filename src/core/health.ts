@@ -1,7 +1,13 @@
-import { rawErrorText } from './errors'
+import { isMissingTableError, rawErrorText } from './errors'
 import { PROBE_PROVIDER, WRITE_PROBE_KEY } from './queue'
 import { readFoundSchema } from './bootstrap'
-import { emptyDiff, diffSchema, schemaOk, EXPECTED_MIGRATIONS, type SchemaDiff } from './schema-contract'
+import {
+  diffSchema,
+  schemaOk,
+  EXPECTED_MIGRATIONS,
+  type ProbeTier,
+  type SchemaDiff,
+} from './schema-contract'
 
 const PROBE_TIMEOUT_MS = 3000
 
@@ -35,7 +41,13 @@ export type HealthReport = {
   warnings: string[]
   checks: {
     connect: CheckResult
-    schema: CheckResult & { diff: SchemaDiff }
+    /**
+     * diff 为 null = 结构探测没跑成，和「什么都没缺」是两件不同的事。
+     * 线上就是在这上面出的事：ok:false 配一个空 diff，
+     * 任何按 missingTables.length === 0 判绿的看板都会显示正常。
+     * tier = 实际生效的探测层级，下次再撞上 authorizer 差异看它就行
+     */
+    schema: CheckResult & { diff: SchemaDiff | null; tier: ProbeTier | null }
     migrations: CheckResult & { table: string; applied: string[]; pending: string[] }
     write: CheckResult & { skipped?: string }
     queue: CheckResult & {
@@ -107,7 +119,14 @@ export type HealthOptions = {
  * （D1 limits）。串行峰值并发 1；并发会让 7 条同打而静默排队，探针变慢。
  *
  * 行写入预算：gate 是 WITHOUT ROWID，一次写 1 行。write 探针 2 行
- * + queue 探针 1 行 = 每次 3 行。30s 轮询 = 2880 次/天 = 8640 行/天。
+ * （INSERT + DELETE）+ queue 探针 2 行（写正数 + 消费端回写负数）= 每次 4 行。
+ * 30s 轮询 = 2880 次/天 = 11520 行/天。
+ *
+ * 提醒：/healthz 无鉴权，而 0001_init.sql 记的基线已经 6.4 万行/天、
+ * 上限 10 万——余量只剩 9000 次调用。也就是说任何超过 10 秒一轮的
+ * 轮询（或多地多份监控）都会把当天写额度打穿，届时站点当天无法写缓存。
+ * 限流中间件是 isolate 内内存计数，挡不住多 isolate / 多 IP。
+ * 要公开暴露就得先加服务端节流，见 CHANGELOG。
  */
 export async function runHealthChecks(env: Env, options: HealthOptions = {}): Promise<HealthReport> {
   const started = Date.now()
@@ -129,7 +148,7 @@ export async function runHealthChecks(env: Env, options: HealthOptions = {}): Pr
       warnings: [],
       checks: {
         connect,
-        schema: { ok: false, ms: 0, error: 'skipped: connect failed', diff: emptyDiff() },
+        schema: { ok: false, ms: 0, error: 'skipped: connect failed', diff: null, tier: null },
         migrations: {
           ok: false,
           ms: 0,
@@ -156,18 +175,25 @@ export async function runHealthChecks(env: Env, options: HealthOptions = {}): Pr
 
   // 与自举的快路径共用同一个结构读取，避免两处各写一份 SQL 走偏
   const schema = await probe(async () => {
-    const diff = diffSchema(await withTimeout(readFoundSchema(db), PROBE_TIMEOUT_MS))
-    if (!schemaOk(diff)) throw Object.assign(new Error('schema incomplete'), { diff })
-    return { diff }
+    const found = await withTimeout(readFoundSchema(db), PROBE_TIMEOUT_MS)
+    const diff = diffSchema(found)
+    if (!schemaOk(diff)) throw Object.assign(new Error('schema incomplete'), { diff, tier: found.tier })
+    return { diff, tier: found.tier }
   })
   const schemaCheck: HealthReport['checks']['schema'] = schema.ok
     ? schema
-    : { ...schema, diff: (schema.diff as SchemaDiff | undefined) ?? emptyDiff() }
+    : {
+        ...schema,
+        diff: (schema.diff as SchemaDiff | undefined) ?? null,
+        tier: (schema.tier as ProbeTier | undefined) ?? null,
+      }
 
   const migrations = await probe(async () => {
-    // 读不到记账表 = 迁移压根没跑过。这不是异常，是结论：把 applied 当空集，
-    // 让 pending 如实列出待应用项，而不是把 "no such table: d1_migrations"
-    // 抛给读 /healthz 的人——他们要的是「缺什么」，不是 SQL 原文。
+    // 读不到记账表 = 迁移压根没跑过。这不是异常，是结论。
+    // 但**只有** "no such table" 能这么解释：超时、鉴权、限额都是故障，
+    // 一并吞成 applied=[] 会把 D1 故障说成「你忘了跑 db:migrate」。
+    // 线上就是被这条掩盖的：d1_migrations 根本不存在，报告却给出一句
+    // 干净的 "1 migration(s) pending"，看起来像成功读到了记账表。
     let applied: string[] = []
     try {
       const rows = await withTimeout(
@@ -177,7 +203,8 @@ export async function runHealthChecks(env: Env, options: HealthOptions = {}): Pr
       applied = (rows.results ?? [])
         .map((row) => row.name)
         .filter((name): name is string => typeof name === 'string')
-    } catch {
+    } catch (error) {
+      if (!isMissingTableError(error)) throw error
       applied = []
     }
     const pending = EXPECTED_MIGRATIONS.filter((name) => !applied.includes(name))

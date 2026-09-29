@@ -460,7 +460,15 @@ describe('元数据端点', () => {
       d1: boolean
       schema: boolean
       checks: {
-        schema: { diff: { missingTables: string[]; missingColumns: Record<string, string[]> } }
+        schema: {
+          diff: {
+            missingTables: string[]
+            missingColumns: Record<string, string[]>
+            missingIndexes: string[]
+            columnsChecked: boolean
+          }
+          tier: string | null
+        }
         migrations: { pending: string[] }
         write: { ok: boolean }
         queue: { ok: boolean; acked: boolean | null }
@@ -476,6 +484,9 @@ describe('元数据端点', () => {
     // 迁移齐全时不该有待应用项，五个探针全过，且没有告警
     expect(health.checks.migrations.pending).toEqual([])
     expect(health.checks.schema.diff.missingTables).toEqual([])
+    // 列必须真的校验过，不能只比表名就算过
+    expect(health.checks.schema.diff.columnsChecked).toBe(true)
+    expect(health.checks.schema.tier).not.toBeNull()
     expect(health.checks.write.ok).toBe(true)
     expect(health.checks.queue.ok).toBe(true)
     expect(health.warnings).toEqual([])

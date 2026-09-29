@@ -199,11 +199,16 @@ meta.get('/status', async (c) => {
       'schema',
       async () => {
         const report = await runHealthChecks(c.env, { probeQueue: false })
+        const diff = report.checks.schema.diff
         return {
           ok: report.schema,
-          missing_tables: report.checks.schema.diff.missingTables,
-          missing_columns: report.checks.schema.diff.missingColumns,
-          missing_indexes: report.checks.schema.diff.missingIndexes,
+          // null = 探测没跑成。渲染成 [] 就等于在说「什么都没缺」，
+          // 而实际上这条信息根本不存在
+          missing_tables: diff?.missingTables ?? null,
+          missing_columns: diff?.missingColumns ?? null,
+          missing_indexes: diff?.missingIndexes ?? null,
+          columns_checked: diff?.columnsChecked ?? false,
+          probe_tier: report.checks.schema.tier,
           migrations_pending: report.checks.migrations.pending,
           write_ok: report.checks.write.ok,
           warnings: report.warnings,
@@ -211,9 +216,11 @@ meta.get('/status', async (c) => {
       },
       {
         ok: false,
-        missing_tables: [],
-        missing_columns: {},
-        missing_indexes: [],
+        missing_tables: null,
+        missing_columns: null,
+        missing_indexes: null,
+        columns_checked: false,
+        probe_tier: null,
         migrations_pending: [],
         write_ok: false,
         warnings: [],

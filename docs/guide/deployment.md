@@ -111,8 +111,8 @@ Worker 里有一段 `ensureSchema()`（`src/core/bootstrap.ts`），在检测到
 **不需要任何手工步骤。** `wrangler deploy` 之后，第一次请求（含 `/healthz`）就会建表，
 业务端点立刻可用。
 
-冷路径上一次查询拿全库结构（`sqlite_master` + `pragma_table_info`）并与
-`src/core/schema-contract.ts` 的契约逐表逐列逐索引比对，结论有三种：
+冷路径拿全库结构并与 `src/core/schema-contract.ts` 的契约逐表逐列逐索引比对，
+结论有三种：
 
 | 契约状态 | 自举行为 |
 | --- | --- |
@@ -122,6 +122,39 @@ Worker 里有一段 `ensureSchema()`（`src/core/bootstrap.ts`），在检测到
 
 补上之后会**重新比对**再决定是否记进记忆，而不是假定「跑过 DDL 就一定好了」——
 缺表和缺列可能同时存在。
+
+### 结构探测是三级的
+
+D1 的 SQL authorizer 未必放行某一种写法，所以探测逐级降级：
+
+| 层级 | 写法 | 说明 |
+| --- | --- | --- |
+| `join` | `LEFT JOIN pragma_table_info(m.name)` | 一条 SQL，本地 miniflare 走这条 |
+| `per_table` | `sqlite_master` + 每表一条 `pragma_table_info('<字面量>')` | 字面量可静态解析，authorizer 能授权 |
+| `master_only` | 只读 `sqlite_master` | 列信息标为未知，报告 `columns_checked: false` |
+
+**生产实测 `join` 被拒**：`m.name` 是列引用，即动态表名，authorizer 解析不出
+要授权哪张表，整条语句 `SQLITE_AUTH`（本地 miniflare 不会拦，所以测试环境
+完全测不出这个问题）。
+
+这不只是「探测失败」。自举的**第一步**就是结构探测，一级被拒会让建表逻辑
+先被自己的读表挡住 —— 表永远建不出来，`/healthz` 一直 503。降级是自举能否
+跑起来的前提，不是容错锦上添花。
+
+`/healthz` 的 `checks.schema.probe_tier` 告诉你实际生效的是哪一级，
+`checks.schema.diff.columns_checked` 告诉你列到底校验了没有。
+列未知时**不会**记进 isolate 记忆：宁可每请求多查一次，也不能把「没验证过」
+记成「验证过」。
+
+> **「查不到」不能渲染成「没缺」。** 列查不到时 `missingColumns` 会是个空对象，
+> 而空对象在 JSON 里和「真的没缺列」长得一模一样。所以契约里单开
+> `columnsChecked` 表达未知，`/healthz` 的 `diff` 在探测失败时为 `null`，
+> `/status` 的 `missing_*` 在拿不到时为 `null`。此前 `ok: false` 配一个空
+> diff，任何按 `missingTables.length === 0` 判绿的看板都会把空库显示成正常。
+
+> **migrations 段只把「表不存在」当作未迁移。** 超时、鉴权、限额都是故障，
+> 一并吞成 `applied: []` 会把 D1 故障说成「你忘了跑 `db:migrate`」，
+> 运维会去跑一条根本没用的命令。
 
 > **为什么幂等迁移不查 `d1_migrations` 就重跑。** 直觉上该跳过「已应用」的迁移，
 > 但那样就修不了漂移：记账说「跑过了」，而表被手工删掉或半截安装时，DDL 再也不会
@@ -461,6 +494,29 @@ D1 那条要特别注意：免费额度是**硬失败**而不是计费超支。`
 头部那份预算表（缓存填充 ≤ 2 万/天、过期清理 ≤ 1.2 万/天，合计约 6.4 万行写入 = 64%）
 不是"参考值"，是别越的红线——越了全站 D1 查询报错。所以 `cache.soft_rows` 别往上抬，
 Cron 的清理批量也别加大。
+
+#### `/healthz` 本身也要写行，而它是无鉴权的
+
+`gate` 是 `WITHOUT ROWID`，一次写算 1 行。`/healthz` 每次调用：
+
+| 探针 | 语句 | 行写入 |
+| --- | --- | --- |
+| write | `INSERT INTO gate` + `DELETE FROM gate` | 2 |
+| queue | 写正数 + 消费端回写负数 | 2 |
+| | **合计** | **4** |
+
+基线 6.4 万 + 上限 10 万 ⇒ 余量 36000 行 ÷ 4 = **每天只剩 9000 次调用**，
+即**任何超过 10 秒一轮的轮询都会打穿当天额度**。打穿之后 D1 写入被拒直到
+UTC 00:00，站点当天写不了缓存（`cache.t1` 全失效）。
+
+限流中间件挡不住：`src/core/ratelimit.ts` 是 isolate 内的内存 `Map`，
+默认 60 rpm/IP，代码注释自己写了「不追求跨实例精确」。Workers 一个 colo
+有多个 isolate，多 IP 更是各算各的。
+
+要对外部署公开的 `/healthz` 之前，先加服务端节流：把上次探针时间存进 D1，
+N 秒内重复调用只跑只读段（connect / schema / migrations），跳过 write 与 queue。
+一次读取换掉 4 行写入的硬上限，与轮询频率、isolate 数、客户端 IP 都无关
+（读取额度 500 万/天，余量充足）。
 
 ### 定时任务
 

@@ -8,7 +8,6 @@ import {
   EXPECTED_MIGRATIONS,
   diffSchema,
   schemaOk,
-  emptyDiff,
   type FoundSchema,
 } from '../src/core/schema-contract'
 
@@ -73,7 +72,12 @@ describe('schema 契约与 0001_init.sql 一致', () => {
 
 describe('diffSchema', () => {
   it('全齐时无缺失', () => {
-    expect(diffSchema(full())).toEqual({ missingTables: [], missingColumns: {}, missingIndexes: [] })
+    expect(diffSchema(full())).toEqual({
+      missingTables: [],
+      missingColumns: {},
+      missingIndexes: [],
+      columnsChecked: true,
+    })
     expect(schemaOk(diffSchema(full()))).toBe(true)
   })
 
@@ -104,6 +108,7 @@ describe('diffSchema', () => {
       missingTables: ['gate'],
       missingColumns: {},
       missingIndexes: [],
+      columnsChecked: true,
     })
   })
 
@@ -113,7 +118,26 @@ describe('diffSchema', () => {
     expect(diffSchema(found).missingIndexes).toEqual([])
   })
 
-  it('emptyDiff 视为健康', () => {
-    expect(schemaOk(emptyDiff())).toBe(true)
+  it('列查不到时 missingColumns 是空对象但不算健康', () => {
+    // 线上事故的根因形态：columnsUnknown 时 missingColumns 就是个空对象，
+    // 在 JSON 里和「真的没缺列」完全一样。靠 columnsChecked 才分得开。
+    // 只看 missingColumns 的看板会把「没查过」显示成「没缺」
+    const found = full()
+    found.columns = new Map()
+    found.columnsUnknown = true
+    const diff = diffSchema(found)
+    expect(diff.missingTables).toEqual([])
+    expect(diff.missingColumns).toEqual({})
+    expect(diff.columnsChecked).toBe(false)
+    expect(schemaOk(diff)).toBe(false)
+  })
+
+  it('列未知但确实缺表时，照常报出缺表', () => {
+    const found = full()
+    found.tables.delete('quota')
+    found.columnsUnknown = true
+    const diff = diffSchema(found)
+    expect(diff.missingTables).toEqual(['quota'])
+    expect(diff.columnsChecked).toBe(false)
   })
 })

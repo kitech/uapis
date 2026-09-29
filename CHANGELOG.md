@@ -15,6 +15,20 @@
 - 自举冷路径做完整契约比对（表 + 列 + 索引），缺表/缺索引就重跑幂等 DDL 补上并
   **复测**；只缺列时明确拒绝硬补并指路 `npm run db:migrate`——`CREATE TABLE IF NOT EXISTS`
   对已存在的表是空操作，唯一的补法又是非幂等的
+- **结构探测三级降级**（`join` / `per_table` / `master_only`）：D1 的 authorizer
+  拒绝 `pragma_table_info(m.name)` 这类动态表名引用（`SQLITE_AUTH`），本地
+  miniflare 不拦所以测试环境测不出来。而自举的**第一步**就是结构探测，
+  一级被拒会让建表逻辑先被自己的读表挡住，表永远建不出来、`/healthz` 一直 503。
+  现在自动降到 `pragma_table_info('<字面量>')`，再不行就只读 `sqlite_master` 并把
+  列标为未知。`/healthz` 的 `checks.schema.tier` 暴露实际生效层级
+- 探不到列时不再伪装成「没缺列」：契约加 `columnsChecked` 表达未知，
+  `/healthz` 的 `diff` 在探测失败时为 **`null`** 而非空对象，`/status` 的
+  `missing_*` 同理。此前 `ok:false` 配一个空 diff，按 `missingTables.length === 0`
+  判绿的看板会把空库显示成正常。列未知时自举**不记** isolate 记忆，
+  宁可每请求多查一次也不把「没验证过」记成「验证过」
+- `migrations` 段只把「表不存在」当作未迁移；超时 / 鉴权 / 限额等故障此前被
+  吞成 `applied: []`，于是 D1 故障被说成「你忘了跑 `db:migrate`」，
+  运维会去跑一条根本没用的命令
 - 稳态下自举每个 isolate 只查一次 D1（模块级记忆）。没有这层记忆的话中间件会给
   每个请求加一次查询，一天 10 万请求就是额外 10 万次 D1 查询
 - 自举的 DDL 与迁移记账放在同一个 `DB.batch()` 里（D1 的 batch 是 SQL 事务），

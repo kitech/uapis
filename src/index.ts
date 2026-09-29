@@ -140,6 +140,12 @@ export default {
           if (result.refused.length > 0) {
             logError({ event: 'schema_bootstrap_refused', migrations: result.refused })
           }
+          // 列没验证过是持续状态（不是一次性事件），单独记一条：
+          // 出现它就说明 /healthz 的 schema 段会长期 ok:false，
+          // 而表可能其实都在。看 probe_tier 字段确认 D1 放行了哪一级
+          if (result.columnsUnverified === true) {
+            logError({ event: 'schema_columns_unverified', applied: result.applied })
+          }
           return controller.cron === CRON_WARM ? warm(env) : prune(env)
         })
         .catch((error) => {

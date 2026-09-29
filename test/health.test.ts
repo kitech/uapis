@@ -28,7 +28,10 @@ describe('runHealthChecks', () => {
       missingTables: [],
       missingColumns: {},
       missingIndexes: [],
+      columnsChecked: true,
     })
+    // 探测层级暴露出来：下次再撞上 authorizer 差异，看这一个字段就行
+    expect(report.checks.schema.tier).toBe('join')
     expect(report.checks.migrations.pending).toEqual([])
     expect(report.checks.write.ok).toBe(true)
     // 队列探针只发不收，acked 首轮必为 null（没有「上一轮」可比）
@@ -147,10 +150,43 @@ describe('runHealthChecks', () => {
     expect(report.status).toBe('degraded')
     expect(report.d1).toBe(false)
     expect(report.schema).toBe(false)
-    // 关键：不能把「连不上」报成「schema 不全」
-    expect(report.checks.schema.diff).toEqual({ missingTables: [], missingColumns: {}, missingIndexes: [] })
+    // 关键：探测没跑成就是 null，不能配一个空 diff ——
+    // 线上就是这里出的事：ok:false 却带着 missingTables: []，
+    // 按 missingTables.length === 0 判绿的看板会把空库显示成正常
+    expect(report.checks.schema.diff).toBeNull()
+    expect(report.checks.schema.tier).toBeNull()
     expect(report.checks.write.skipped).toBe('connect failed')
     expect(report.checks.queue.error).toBe('skipped: connect failed')
+  })
+
+  it('migrations 段：非「表不存在」的读取故障不能报成 pending', async () => {
+    // 回归：原来 catch 里一律 applied=[]，SQLITE_AUTH / 超时都被说成
+    // 「你忘了跑 db:migrate」。线上 d1_migrations 根本不存在，报告却给出一句
+    // 干净的 "1 migration(s) pending"，看起来像成功读到了记账表
+    const broken = {
+      ...env,
+      DB: {
+        prepare: (sql: string) => {
+          if (sql.includes('d1_migrations')) {
+            throw new Error('D1_ERROR: not authorized: SQLITE_AUTH: not authorized')
+          }
+          return env.DB.prepare(sql)
+        },
+      },
+    } as unknown as Env
+    const report = await runHealthChecks(broken)
+    expect(report.checks.migrations.ok).toBe(false)
+    expect(report.checks.migrations.error).toContain('SQLITE_AUTH')
+  })
+
+  it('migrations 段：真的没迁移时报 pending，而不是报故障', async () => {
+    await dropEverything()
+    const report = await runHealthChecks(env)
+    expect(report.checks.migrations.ok).toBe(false)
+    expect(report.checks.migrations.pending).toEqual(['0001_init.sql'])
+    // 「表不存在」才是「没迁移过」，error 说的是待应用而不是 SQL 报错
+    expect(report.checks.migrations.error).toContain('pending')
+    expect(report.checks.migrations.error).not.toContain('no such table')
   })
 
   it('probeQueue: false 时不探队列，也不报 queue 告警', async () => {
@@ -185,5 +221,7 @@ ${columns},
     expect(report.schema).toBe(false)
     expect(report.checks.schema.diff.missingTables).toEqual([])
     expect(report.checks.schema.diff.missingColumns).toEqual({ cache: ['stale_until'] })
+    // 这次列是真查到了，所以「缺列」这个结论可信
+    expect(report.checks.schema.diff.columnsChecked).toBe(true)
   })
 })
