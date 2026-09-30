@@ -4,6 +4,8 @@ import { ApiError } from './errors'
 
 export const JSON_CT = 'application/json; charset=utf-8'
 export const TEXT_CT = 'text/plain; charset=utf-8'
+export const RSS_CT = 'application/rss+xml; charset=utf-8'
+export const ATOM_CT = 'application/atom+xml; charset=utf-8'
 
 /**
  * 物化 `c.res`，让 Hono 把中间件写入的 header（X-Request-ID / CORS / 限流）

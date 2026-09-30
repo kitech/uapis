@@ -29,9 +29,10 @@ import { runtimeFor } from '../src/providers'
 import { parseAtom } from '../src/providers/arxiv'
 import { extractArticle } from '../src/providers/economist'
 import { egressHostsOf, providerByName } from '../src/core/registry'
+import type { TransformResult } from '../src/providers/runtime'
 import { fetchUpstream, pickChannel } from '../src/core/fetcher'
 import { normalizeOrigin, siteUrlOf } from '../src/core/site'
-import { FORMAT_PARAM, resolveFormat, reshapeToHotboard } from '../src/core/uapis'
+import { FORMAT_PARAM, resolveFormat, reshapeFeed } from '../src/core/uapis'
 
 /** miniflare 的 Cloudflare.Env 缺少 src/types.ts 里声明的 ADMIN_TOKEN，测试里做一次桥接 */
 const env = cloudflareEnv as unknown as Env
@@ -278,6 +279,21 @@ describe('OpenAPI 生成', () => {
       ids.add(item?.operationId ?? '')
     }
     expect(ids.size).toBe(allEndpoints().length)
+  })
+
+  it('feed 端点的 200 声明 rss/atom 两种媒体类型，非 feed 不声明', () => {
+    const contentOf = (path: string) =>
+      ((doc.paths[path]?.get?.responses[200] as { content: Record<string, unknown> }).content)
+    for (const { endpoint } of allEndpoints().filter((e) => e.endpoint.resource === 'feed')) {
+      const keys = Object.keys(contentOf(endpoint.path))
+      expect(keys, endpoint.path).toContain('application/rss+xml')
+      expect(keys, endpoint.path).toContain('application/atom+xml')
+      expect(keys, endpoint.path).toContain('application/json')
+    }
+    const usgsEvent = allEndpoints().find(
+      (e) => e.provider.name === 'usgs' && e.endpoint.op === 'event',
+    )!.endpoint
+    expect(Object.keys(contentOf(usgsEvent.path))).toEqual(['application/json'])
   })
 })
 
@@ -2021,27 +2037,50 @@ function tgChannel(count: number, withHeader = true): string {
 
 describe('format=uapis（兼容 uapis.cn misc/hotboard 结构）', () => {
   /** 走 provider transform 拿到 legacy 输出，再过整形器，模拟 refresh 的落库前链路 */
+  function reshapeOut(
+    providerName: string,
+    op: string,
+    id: string,
+    query: Array<[string, string]>,
+    legacy: string,
+  ): TransformResult {
+    const rt = runtimeFor(providerName)!
+    let text = legacy
+    if (rt.transform !== undefined) {
+      text = rt.transform(legacy, { op, id, query }).text
+    }
+    const found = allEndpoints().find(
+      (e) => e.provider.name === providerName && e.endpoint.op === op,
+    )!
+    const out = reshapeFeed(found.provider, found.endpoint, { op, id, query }, text)
+    expect(out).toBeDefined()
+    return out!
+  }
+
+  /** uapis 结构的便捷入口：直接给解析后的对象 */
   function reshape(
-    provider: string,
+    providerName: string,
     op: string,
     id: string,
     query: Array<[string, string]>,
     legacy: string,
   ): Record<string, unknown> {
-    const rt = runtimeFor(provider)!
-    let text = legacy
-    if (rt.transform !== undefined) {
-      text = rt.transform(legacy, { op, id, query }).text
-    }
-    const endpoint = allEndpoints().find(
-      (e) => e.provider.name === provider && e.endpoint.op === op,
-    )!.endpoint
-    const out = reshapeToHotboard(provider, endpoint, { op, id, query }, text)
-    expect(out).toBeDefined()
-    return JSON.parse(out!.text)
+    return JSON.parse(reshapeOut(providerName, op, id, query, legacy).text)
   }
 
-  it('参数声明：16 个 feed 端点都带 format，默认 uapis、取值 original|uapis', () => {
+  /** 指定 format 的便捷入口：返回原始 TransformResult（XML 形态要断言 content-type） */
+  function reshapeAs(
+    format: 'rss' | 'atom',
+    providerName: string,
+    op: string,
+    id: string,
+    query: Array<[string, string]>,
+    legacy: string,
+  ): TransformResult {
+    return reshapeOut(providerName, op, id, query, [...query, ['format', format]])
+  }
+
+  it('参数声明：16 个 feed 端点都带 format，默认 uapis、取值 original|uapis|rss|atom', () => {
     const feeds = allEndpoints().filter((e) => e.endpoint.resource === 'feed')
     expect(feeds.length).toBe(16)
     for (const { provider, endpoint } of feeds) {
@@ -2050,7 +2089,7 @@ describe('format=uapis（兼容 uapis.cn misc/hotboard 结构）', () => {
       expect(param).toEqual(FORMAT_PARAM)
       expect(param!.in).toBe('query')
       expect(param!.default).toBe('uapis')
-      expect(param!.enum).toEqual(['original', 'uapis'])
+      expect(param!.enum).toEqual(['original', 'uapis', 'rss', 'atom'])
     }
     // 非 feed 端点不声明该参数
     for (const { provider, endpoint } of allEndpoints().filter(
@@ -2063,20 +2102,27 @@ describe('format=uapis（兼容 uapis.cn misc/hotboard 结构）', () => {
     }
   })
 
-  it('resolveFormat：缺省与 uapis 都走兼容结构，只有 original 走原结构', () => {
+  it('resolveFormat：缺省与 uapis 都走兼容结构，rss/atom 走各自的 XML', () => {
     expect(resolveFormat({ op: 'catalog', id: 'g', query: [] })).toBe('uapis')
     expect(resolveFormat({ op: 'catalog', id: 'g', query: [['format', 'uapis']] })).toBe('uapis')
+    expect(resolveFormat({ op: 'catalog', id: 'g', query: [['format', 'rss']] })).toBe('rss')
+    expect(resolveFormat({ op: 'catalog', id: 'g', query: [['format', 'atom']] })).toBe('atom')
     expect(resolveFormat({ op: 'catalog', id: 'g', query: [['format', 'original']] })).toBe(
       'original',
     )
+    // 枚举外取值一律回落 uapis，绝不外泄成 XML：v1 在参数校验阶段会先拒掉
+    expect(resolveFormat({ op: 'catalog', id: 'g', query: [['format', 'rss2']] })).toBe('uapis')
   })
 
-  it('缓存键按 format 分桶：两种形态不会互相污染', () => {
+  it('缓存键按 format 分桶：四种形态互不污染', () => {
     const key = (format: string) =>
       buildCacheKey('usgs', 'feed', { op: 'search', id: '', query: [['format', format]] })
+    expect(new Set(['uapis', 'original', 'rss', 'atom'].map(key)).size).toBe(4)
     expect(key('uapis')).not.toBe(key('original'))
     expect(key('uapis')).toContain('format=uapis')
     expect(key('original')).toContain('format=original')
+    expect(key('rss')).toContain('format=rss')
+    expect(key('atom')).toContain('format=atom')
   })
 
   it('fourchan catalog：hotboard 键位 + replies 作热度 + extra 保真 + thread 链接', () => {
@@ -2216,19 +2262,38 @@ describe('format=uapis（兼容 uapis.cn misc/hotboard 结构）', () => {
   it('非 feed 端点与坏结构一律不动：undefined 表示原样落库', () => {
     const usgsEvent = allEndpoints().find(
       (e) => e.provider.name === 'usgs' && e.endpoint.op === 'event',
-    )!.endpoint
+    )!
     expect(
-      reshapeToHotboard('usgs', usgsEvent, { op: 'event', id: 'ci1', query: [] }, '{}'),
+      reshapeFeed(usgsEvent.provider, usgsEvent.endpoint, { op: 'event', id: 'ci1', query: [] }, '{}'),
     ).toBeUndefined()
     const devtoArticles = allEndpoints().find(
       (e) => e.provider.name === 'devto' && e.endpoint.op === 'articles',
-    )!.endpoint
+    )!
     // 上游非 JSON / 结构不符：整形器放弃，绝不产出空 list 覆盖原始内容
     expect(
-      reshapeToHotboard('devto', devtoArticles, { op: 'articles', id: '', query: [] }, 'not json'),
+      reshapeFeed(
+        devtoArticles.provider,
+        devtoArticles.endpoint,
+        { op: 'articles', id: '', query: [] },
+        'not json',
+      ),
     ).toBeUndefined()
     expect(
-      reshapeToHotboard('devto', devtoArticles, { op: 'articles', id: '', query: [] }, '{}'),
+      reshapeFeed(
+        devtoArticles.provider,
+        devtoArticles.endpoint,
+        { op: 'articles', id: '', query: [] },
+        '{}',
+      ),
+    ).toBeUndefined()
+    // format=original：feed 端点也零改动，字节必须是上游原样
+    expect(
+      reshapeFeed(
+        devtoArticles.provider,
+        devtoArticles.endpoint,
+        { op: 'articles', id: '', query: [['format', 'original']] },
+        JSON.stringify([{ title: 'a', url: 'https://dev.to/a' }]),
+      ),
     ).toBeUndefined()
   })
 
@@ -2241,5 +2306,316 @@ describe('format=uapis（兼容 uapis.cn misc/hotboard 结构）', () => {
     const list = out.list as Array<Record<string, unknown>>
     expect(list.map((i) => i.index)).toEqual([1, 2, 3])
     expect(list.map((i) => i.title)).toEqual(['first', 'second', 'third'])
+  })
+})
+
+/**
+ * 不引 XML 解析库（零依赖是这个项目的硬约束），但把真会翻车的地方查到位：
+ * 非法码点、没转义的 `&`、没闭合的标签。
+ */
+function expectWellFormed(xml: string): void {
+  expect(xml.startsWith('<?xml version="1.0" encoding="UTF-8"?>')).toBe(true)
+  // XML 1.0 禁用的码点：留着整份文档不合法，阅读器直接拒收
+  expect(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(xml)).toBe(false)
+  // 孤立代理项同样不合法（成对的 emoji 是合法的，不能误伤）
+  expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(xml)).toBe(false)
+  // 每个 & 都得是完整实体，否则说明上游文本没转义
+  expect(/&(?!amp;|lt;|gt;|quot;|apos;|#\d+;|#x[0-9a-fA-F]+;)/.test(xml)).toBe(false)
+  // 标签闭合
+  const stack: string[] = []
+  for (const m of xml.matchAll(/<(\/?)([a-zA-Z][\w-]*)[^>]*?(\/?)>/g)) {
+    const closing = m[1] as string
+    const name = m[2] as string
+    if (m[3] === '/') continue
+    if (closing === '/') {
+      expect(stack.pop(), `</${name}> 没有对应的开标签`).toBe(name)
+    } else {
+      stack.push(name)
+    }
+  }
+  expect(stack).toEqual([])
+}
+
+describe('format=rss|atom（RSS 2.0 / Atom 1.0）', () => {
+  const fourchanBody = JSON.stringify([
+    {
+      page: 1,
+      threads: [{ no: 3, replies: 7, sub: 'a & b', last_modified: 1759000000 }],
+    },
+  ])
+  // hn / gitlab 是 passthrough 无 transform，legacy 就是上游原样
+  const hnBody = JSON.stringify({
+    hits: [
+      { objectID: '1', title: 'Show HN', url: 'https://x.example/1', points: 12, created_at_i: 1759000000 },
+      { objectID: '2', story_title: 'ask hn', points: 3, created_at_i: 1759000001 },
+    ],
+    nbHits: 2,
+  })
+  const gitlabBody = JSON.stringify([
+    {
+      id: 'abc',
+      short_id: 'abc1234',
+      title: 'fix: x',
+      message: 'fix: x\n\nbody',
+      web_url: 'https://gitlab.com/g/p/-/commit/abc',
+      committed_date: '2026-09-29T10:00:00Z',
+    },
+  ])
+  const usgsBody = JSON.stringify({
+    features: [
+      { type: 'Feature', properties: { mag: 4.5, place: 'X km S of Y', time: 1759000000000 }, geometry: null },
+    ],
+  })
+
+  /** 取 feed 级 <id>：必须切在第一条 <entry> 之前，否则会抓到 entry 的 id */
+  function atomFeedId(xml: string): string {
+    return /<id>([\s\S]*?)<\/id>/.exec(xml.slice(0, xml.indexOf('<entry>')))![1]!
+  }
+
+  it('RSS：channel 三必填齐全 + 绝对 url 走 isPermaLink + pubDate 合 RFC-822', () => {
+    const out = reshapeAs('rss', 'fourchan', 'catalog', 'g', [], fourchanBody)
+    expectWellFormed(out.text)
+    expect(out.contentType).toBe('application/rss+xml; charset=utf-8')
+    expect(out.text).toContain('<rss version="2.0">')
+    expect(out.text).toContain('<link>https://a.4cdn.org</link>')
+    expect(out.text).toContain('<description>uapis fourchan:g feed via 4chan</description>')
+    expect(out.text).toContain('<generator>uapis/0.1.0</generator>')
+    // 上游 sub 里的 & 必须转义
+    expect(out.text).toContain('<title>a &amp; b</title>')
+    expect(out.text).toContain('<guid isPermaLink="true">https://boards.4chan.org/g/thread/3</guid>')
+    expect(out.text).toMatch(
+      /<pubDate>[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT<\/pubDate>/,
+    )
+    // 4chan 那个 last_modified 是秒，1759000000s 应对上
+    expect(out.text).toContain(`<pubDate>${new Date(1759000000 * 1000).toUTCString()}</pubDate>`)
+  })
+
+  it('RSS：上游文本里的注入被转义，不产生可执行的标记', () => {
+    // 必须用透传源（devto）：telegram 那边 provider 已经把标签全剥了、
+    // 并链式解了实体，注入在进 XML 层之前就没了，测不到转义本身
+    const evil = '</title><script>alert(1)</script> & <b>粗体</b>'
+    const out = reshapeAs('rss', 'devto', 'articles', '', [], JSON.stringify([
+      { title: evil, url: 'https://dev.to/a1', published_at: '2026-09-29T10:00:00Z' },
+    ]))
+    expectWellFormed(out.text)
+    expect(out.text).not.toContain('<script>')
+    expect(out.text).toContain(
+      '<title>&lt;/title&gt;&lt;script&gt;alert(1)&lt;/script&gt; &amp; &lt;b&gt;粗体&lt;/b&gt;</title>',
+    )
+  })
+
+  it('telegram：provider 已剥标签解实体，XML 层不再二次解码', () => {
+    const out = reshapeAs('rss', 'telegram', 'channel', 'telegram', [], tgHeader() + tgPost('c', 1, 'a &amp; b'))
+    expectWellFormed(out.text)
+    // provider 把 &amp; 解成 &，XML 层只编码一次，不出现 &amp;amp;
+    expect(out.text).toContain('<title>a &amp; b</title>')
+    expect(out.text).not.toContain('&amp;amp;')
+  })
+
+
+  it('RSS：无绝对 url 时 guid 退回 urn，openmeteo 不给 pubDate', () => {
+    const out = reshapeAs('rss', 'openmeteo', 'hourly', '', [], JSON.stringify({
+      latitude: 37.1,
+      hourly: { time: ['2026-09-29T10:00'], temperature_2m: [21.5] },
+    }))
+    expectWellFormed(out.text)
+    // 汇总时的 feed 时间兜底，条目级不给（本地时区串无偏移，转不成可靠时刻）
+    expect(out.text).toContain('<guid isPermaLink="false">urn:uapis:openmeteo:hourly:item:1</guid>')
+    expect(out.text).not.toContain('<pubDate>')
+    expect(out.text).toContain('<description>temperature_2m: 21.5</description>')
+  })
+
+  it('RSS：空标题兜底成序号，item 至少满足 title 或 description', () => {
+    const out = reshapeAs('rss', 'usgs', 'search', '', [], JSON.stringify({
+      features: [{ properties: { mag: 1, time: 1759000000000 } }],
+    }))
+    expectWellFormed(out.text)
+    expect(out.text).toContain('<title>#1</title>')
+    expect(out.text).toContain('<link>https://earthquake.usgs.gov</link>')
+  })
+
+  it('Atom：feed 与 entry 三必填齐全 + RFC-3339 + href 属性 + Content-Type', () => {
+    const out = reshapeAs('atom', 'telegram', 'channel', 'telegram', [], tgChannel(2))
+    expectWellFormed(out.text)
+    expect(out.contentType).toBe('application/atom+xml; charset=utf-8')
+    expect(out.text).toContain('<feed xmlns="http://www.w3.org/2005/Atom">')
+    expect(out.text).toContain('<id>urn:uapis:telegram:channel:telegram</id>')
+    // feed 级 author 是规范要求的兜底
+    expect(out.text).toContain('<name>Telegram</name>')
+    expect(out.text).toMatch(/<updated>\d{4}-\d{2}-\d{2}T[\d:.]+Z<\/updated>/)
+    // Atom 的 link 是无内容元素，走 href 属性而不是文本节点
+    expect(out.text).toContain('<link rel="alternate" href="https://t.me/c/2"/>')
+    // 两条 entry，id 取帖子链接
+    expect(out.text.match(/<entry>/g)).toHaveLength(2)
+    expect(out.text).toContain('<id>https://t.me/c/2</id>')
+  })
+
+  it('Atom：channel 标题取上游 top.title，缺失才回落 uapis <type>', () => {
+    const withTitle = reshapeAs('atom', 'telegram', 'channel', 'telegram', [], tgChannel(1))
+    expect(withTitle.text).toContain('<title>Telegram</title>')
+    // 透传源没有顶层标题
+    const noTitle = reshapeAs('atom', 'lobsters', 'hot', '', [], JSON.stringify([
+      { short_id: 'a1', title: 'rust', url: 'https://l.example/a1', created_at: '2026-09-29T10:00:00Z' },
+    ]))
+    expectWellFormed(noTitle.text)
+    expect(noTitle.text).toContain('<title>uapis lobsters:hot</title>')
+  })
+
+  it('summary 降成纯文本：上游 HTML 片段不进 XML', () => {
+    // devto 的 description 是 HTML
+    const devto = reshapeAs('rss', 'devto', 'articles', '', [], JSON.stringify([
+      {
+        title: 'a1',
+        url: 'https://dev.to/a1',
+        published_at: '2026-09-29T10:00:00Z',
+        description: '<p>hi &amp; bye<script>alert(1)</script></p>',
+      },
+    ]))
+    expectWellFormed(devto.text)
+    expect(devto.text).toContain('<description>hi &amp; bye</description>')
+    expect(devto.text).not.toContain('<p>')
+    expect(devto.text).not.toContain('<script>')
+    // script 的内容也该整块丢掉，不能留在正文里
+    expect(devto.text).not.toContain('alert(1)')
+  })
+
+  it('medium 的 excerpt 已在 provider 里过了 htmlToText，XML 层不二次解码', () => {
+    const out = reshapeAs(
+      'rss',
+      'medium',
+      'tag',
+      'programming',
+      [],
+      mdFeed([mdItem({ title: 'p1', snippet: 'plain &amp; simple' })]),
+    )
+    expectWellFormed(out.text)
+    // provider 存的是 `plain & simple`，XML 层只做一次转义
+    expect(out.text).toContain('<description>plain &amp; simple</description>')
+    expect(out.text).not.toContain('&amp;amp;')
+  })
+
+  it('item 数与 uapis 形态完全一致，条目顺序不重排', () => {
+    const legacy = JSON.stringify([
+      { short_id: 'a1', title: 'first', score: 1 },
+      { short_id: 'b2', title: 'second', score: 2 },
+      { short_id: 'c3', title: 'third', score: 3 },
+    ])
+    const json = reshape('lobsters', 'newest', '', [], legacy)
+    const rss = reshapeAs('rss', 'lobsters', 'newest', '', [], legacy)
+    const atom = reshapeAs('atom', 'lobsters', 'newest', '', [], legacy)
+    expectWellFormed(rss.text)
+    expectWellFormed(atom.text)
+    expect(rss.text.match(/<item>/g)).toHaveLength((json.list as unknown[]).length)
+    expect(atom.text.match(/<entry>/g)).toHaveLength((json.list as unknown[]).length)
+    expect(rss.text).toContain('<title>first</title>')
+    expect(rss.text.indexOf('first')).toBeLessThan(rss.text.indexOf('third'))
+  })
+
+  it('超长标题被截断，且先截断再转义（不会切出半个实体）', () => {
+    const out = reshapeAs('rss', 'lobsters', 'hot', '', [], JSON.stringify([
+      { short_id: 'a1', title: `&${'x'.repeat(3000)}`, url: 'https://l.example/a1' },
+    ]))
+    expectWellFormed(out.text)
+    // 2000 字上限：& 占 1 个字符，所以是 1999 个 x；转义后 &amp; 只算 1 个 &
+    // 必须锚在 <item> 后面：channel 的 title 排在前面，非贪婪匹配会抓到那个
+    const itemTitle = /<item>[\s\S]*?<title>([\s\S]*?)<\/title>/.exec(out.text)![1]!
+    expect(itemTitle.match(/x/g)).toHaveLength(1999)
+    expect(itemTitle.endsWith('x')).toBe(true)
+    expect(itemTitle.startsWith('&amp;')).toBe(true)
+  })
+
+  it('非法码点与孤立代理项被剔除，emoji 不误伤', () => {
+    // devto 是透传源，上游字节原样进整形器，最能暴露 XML 硬化有没有做
+    const out = reshapeAs('rss', 'devto', 'articles', '', [], JSON.stringify([
+      {
+        title: 'bell\u0007\u0000end \uD800 ok \u{1F600}',
+        url: 'https://dev.to/a1',
+        published_at: '2026-09-29T10:00:00Z',
+      },
+    ]))
+    expectWellFormed(out.text)
+    // XML 1.0 禁用的控制码点与半个代理项都没了，成对的 emoji 还在
+    expect(out.text).not.toContain('\u0007')
+    expect(out.text).not.toContain('\u0000')
+    expect(out.text).not.toContain('\uD800')
+    expect(out.text).toContain('<title>bellend  ok \u{1F600}</title>')
+  })
+
+  it('Atom feed id 带 query 段：id/op 为空、区分信息只在 query 的端点不撞车', () => {
+    // usgs search / gitlab commits / openmeteo hourly / hn front+latest 都是这形状
+    const usgsA = reshapeAs('atom', 'usgs', 'search', '', [['minmagnitude', '2.5']], usgsBody)
+    const usgsB = reshapeAs('atom', 'usgs', 'search', '', [['minmagnitude', '4.5']], usgsBody)
+    expectWellFormed(usgsA.text)
+    expect(atomFeedId(usgsA.text)).not.toBe(atomFeedId(usgsB.text))
+
+    const g1 = reshapeAs('atom', 'gitlab', 'commits', '', [['project', 'a/b']], gitlabBody)
+    const g2 = reshapeAs('atom', 'gitlab', 'commits', '', [['project', 'c/d']], gitlabBody)
+    expectWellFormed(g1.text)
+    expect(atomFeedId(g1.text)).not.toBe(atomFeedId(g2.text))
+
+    // hn 的 page 也算：page=0 与 page=1 是两个 feed
+    const h1 = reshapeAs('atom', 'hackernews', 'front', '', [['page', '0']], hnBody)
+    const h2 = reshapeAs('atom', 'hackernews', 'front', '', [['page', '1']], hnBody)
+    expect(atomFeedId(h1.text)).not.toBe(atomFeedId(h2.text))
+  })
+
+  it('Atom feed id 对参数顺序不敏感，且 format 不参与 id', () => {
+    // hashPairs 先 sort，同一组参数换个顺序必须同一个 id
+    const a = reshapeAs('atom', 'usgs', 'search', '', [['minmagnitude', '4.5'], ['limit', '200']], usgsBody)
+    const b = reshapeAs('atom', 'usgs', 'search', '', [['limit', '200'], ['minmagnitude', '4.5']], usgsBody)
+    expect(atomFeedId(a.text)).toBe(atomFeedId(b.text))
+    // reshapeAs 总带 format，但只有 format 时不加哈希段 → format 确实被滤掉了
+    const bare = reshapeAs('atom', 'gitlab', 'commits', '', [], gitlabBody)
+    expect(atomFeedId(bare.text)).toBe('urn:uapis:gitlab:commits')
+  })
+
+  it('gitlab commits：无顶层 title 时 channel 标题回落，entry id 是 commit 链接', () => {
+    const out = reshapeAs('atom', 'gitlab', 'commits', '', [['project', 'g/p']], gitlabBody)
+    expectWellFormed(out.text)
+    expect(out.text).toContain('<title>uapis gitlab:commits</title>')
+    expect(out.text).toContain('<id>https://gitlab.com/g/p/-/commit/abc</id>')
+    expect(out.text).toContain(`<updated>${new Date('2026-09-29T10:00:00Z').toISOString()}</updated>`)
+  })
+
+  it('hackernews front：外链条目 id 取外链，无外链的用提取器补的站内链接', () => {
+    const out = reshapeAs('atom', 'hackernews', 'front', '', [], hnBody)
+    expectWellFormed(out.text)
+    expect(out.text.match(/<entry>/g)).toHaveLength(2)
+    expect(out.text).toContain('<id>https://x.example/1</id>')
+    expect(out.text).toContain('<id>https://news.ycombinator.com/item?id=2</id>')
+  })
+
+  it('hackernews 的 story_text 是 HTML，降成纯文本', () => {
+    const out = reshapeAs('rss', 'hackernews', 'front', '', [], JSON.stringify({
+      hits: [
+        {
+          objectID: '3',
+          title: 't',
+          url: 'https://x.example/3',
+          created_at_i: 1759000000,
+          story_text: '<p>a &amp; b<script>bad()</script></p>',
+        },
+      ],
+    }))
+    expectWellFormed(out.text)
+    expect(out.text).toContain('<description>a &amp; b</description>')
+    expect(out.text).not.toContain('bad()')
+  })
+
+  it('同一 feed 内 url 重复时不产重复 id / guid', () => {
+    const body = JSON.stringify([
+      { short_id: 'a1', title: 'first', url: 'https://l.example/dup' },
+      { short_id: 'a2', title: 'again', url: 'https://l.example/dup' },
+    ])
+    const atom = reshapeAs('atom', 'lobsters', 'hot', '', [], body)
+    expectWellFormed(atom.text)
+    const ids = [...atom.text.matchAll(/<entry>[\s\S]*?<id>([\s\S]*?)<\/id>/g)].map((m) => m[1]!)
+    expect(ids).toEqual(['https://l.example/dup', 'urn:uapis:lobsters:hot:item:2'])
+    expect(new Set(ids).size).toBe(ids.length)
+
+    const rss = reshapeAs('rss', 'lobsters', 'hot', '', [], body)
+    expectWellFormed(rss.text)
+    expect(rss.text).toContain('<guid isPermaLink="true">https://l.example/dup</guid>')
+    expect(rss.text).toContain('<guid isPermaLink="false">urn:uapis:lobsters:hot:item:2</guid>')
   })
 })

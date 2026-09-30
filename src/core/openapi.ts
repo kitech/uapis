@@ -4,6 +4,21 @@ import { TTL_POLICIES } from './ttl'
 const ERROR_REF = { $ref: '#/components/schemas/UApiError' } as const
 const RATE_REF = { $ref: '#/components/schemas/RateLimited' } as const
 
+/**
+ * feed 端点带 `format=rss|atom` 时成功响应是 XML，两种媒体类型必须一并声明，
+ * 否则这份文档会对订阅者撒谎。
+ */
+function okContent(endpoint: EndpointDef): Record<string, unknown> {
+  const content: Record<string, unknown> = {
+    'application/json': { schema: { type: 'object' } },
+  }
+  if (endpoint.resource === 'feed') {
+    content['application/rss+xml'] = { schema: { type: 'string' } }
+    content['application/atom+xml'] = { schema: { type: 'string' } }
+  }
+  return content
+}
+
 /** 手写生成 OpenAPI 3.1：registry 是唯一数据源，不引入生成库 */
 export function buildOpenApi(siteUrl: string): Record<string, unknown> {
   const paths: Record<string, Record<string, unknown>> = {}
@@ -18,9 +33,10 @@ export function buildOpenApi(siteUrl: string): Record<string, unknown> {
       parameters: endpoint.params.map(paramSchema),
       responses: {
         200: {
-          description: '上游数据，成功响应为裸业务对象（无信封）',
+          description:
+            '上游数据，成功响应为裸业务对象（无信封）；feed 端点带 format=rss|atom 时为 RSS 2.0 / Atom 1.0',
           headers: cacheHeaders(),
-          content: { 'application/json': { schema: { type: 'object' } } },
+          content: okContent(endpoint),
         },
         202: {
           description: '已入队，等待回源；需带 `Prefer: respond-async`',

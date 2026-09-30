@@ -1,14 +1,19 @@
-import type { EndpointDef, ParamDef } from './registry'
+import type { EndpointDef, ParamDef, ProviderDef } from './registry'
 import type { TransformResult } from '../providers/runtime'
 import type { Target } from './target'
 import { queryValue } from './target'
+import { JSON_CT } from './envelope'
+import { toAtom, toRss, plainText } from './feedxml'
+import type { FeedXmlContext } from './feedxml'
 
 /**
  * `?format=` 结构切换：`uapis`（默认）= 兼容 uapis.cn `misc/hotboard` 结构，
+ * `rss` / `atom` = 从同一份切片序列化成 RSS 2.0 / Atom 1.0，
  * `original` = 保留 provider 原本结构（透传上游字节 / 各自 transform 信封）。
  *
- * 整形只发生在落库前（refresh.ts），缓存键已含 `format` 参数，两种形态天然分桶；
- * `original` 路径字节零改动。条目一律 lossless：`extra` 保留原条目的完整对象。
+ * 整形只发生在落库前（refresh.ts），缓存键已含 `format` 参数，各形态天然分桶；
+ * `original` 路径字节零改动。uapis 的条目一律 lossless：`extra` 保留原条目的完整对象。
+ * RSS/Atom 只放标准元素能表达的东西，`hot_value` / `cover` / `extra` 不进 XML。
  */
 export const FORMAT_PARAM: ParamDef = {
   name: 'format',
@@ -16,18 +21,19 @@ export const FORMAT_PARAM: ParamDef = {
   type: 'string',
   required: false,
   description:
-    '响应结构：uapis=兼容 uapis.cn misc/hotboard 结构（默认）；original=保留 provider 原本结构',
-  enum: ['original', 'uapis'],
+    '响应结构：uapis=兼容 uapis.cn misc/hotboard 结构（默认）；rss=RSS 2.0；atom=Atom 1.0；original=保留 provider 原本结构',
+  enum: ['original', 'uapis', 'rss', 'atom'],
   default: 'uapis',
 }
 
-export type OutputFormat = 'original' | 'uapis'
+export type OutputFormat = 'original' | 'uapis' | 'rss' | 'atom'
 
 export function resolveFormat(target: Target): OutputFormat {
-  return queryValue(target, 'format') === 'original' ? 'original' : 'uapis'
+  const raw = queryValue(target, 'format')
+  return raw === 'original' || raw === 'rss' || raw === 'atom' ? raw : 'uapis'
 }
 
-interface FeedSlice {
+export interface FeedSlice {
   type: string
   updateTime: string
   /** 原 provider 顶层附加字段（不与 type/update_time/list 冲突） */
@@ -37,6 +43,10 @@ interface FeedSlice {
     url: string
     hot_value: string
     cover?: string
+    /** 条目自身的 ISO 8601 时间，给 Atom 必填的 entry/updated 与 RSS pubDate */
+    date?: string
+    /** 纯文本摘要，给 RSS description / Atom summary；没来源就不给 */
+    summary?: string
     extra: unknown
   }>
 }
@@ -55,6 +65,15 @@ function isoOf(ms: number): string {
 /** 字符串日期（RFC-822/ISO 都可能）→ ISO 8601 Z；解析不出来用当前时点 */
 function isoOfStr(value: string): string {
   return isoOf(Date.parse(value))
+}
+
+/**
+ * 可选日期：解析不出来就不给这个字段，让 XML 层回落到 feed 级时间，
+ * 而不是伪造一个「现在」——pubDate 写当前时点等于对订阅者撒谎。
+ */
+function isoOpt(value: unknown): string | undefined {
+  const ms = typeof value === 'number' ? value : Date.parse(str(value))
+  return Number.isFinite(ms) && ms > 0 ? new Date(ms).toISOString() : undefined
 }
 
 /** 去掉一个键拿其余顶层字段（保留原 provider 的附加信息，同时不与 hotboard 保留键冲突） */
@@ -81,6 +100,8 @@ function fourchanCatalog(legacy: unknown, target: Target): FeedSlice | undefined
       title: sub.length > 0 ? sub : `Thread #${no}`,
       url: `https://boards.4chan.org/${target.id}/thread/${no}`,
       hot_value: typeof thread.replies === 'number' ? String(thread.replies) : '0',
+      // 4chan 给的是秒
+      date: isoOpt(lm * 1000),
       extra: { ...thread },
     }
   })
@@ -104,6 +125,7 @@ function telegramChannel(legacy: unknown, target: Target): FeedSlice | undefined
       title: str(post.text),
       url: str(post.url),
       hot_value: typeof post.views === 'number' ? String(post.views) : '0',
+      date: isoOpt(str(post.date)),
       extra: { ...post },
     })),
   }
@@ -125,6 +147,9 @@ function mediumSlice(op: string): Extractor {
         url: str(post.url),
         hot_value: '0',
         cover: str(post.image) || undefined,
+        date: isoOpt(str(post.updated) || str(post.published)),
+        // provider 那边已经过了 htmlToText，这里是纯文本，别再套 plainText
+        summary: str(post.excerpt) || undefined,
         extra: { ...post },
       })),
     }
@@ -148,6 +173,9 @@ function hnSlice(op: string): Extractor {
           str(hit.url) ||
           (objectID.length > 0 ? `https://news.ycombinator.com/item?id=${objectID}` : ''),
         hot_value: typeof hit.points === 'number' ? String(hit.points) : '0',
+        date: isoOpt(typeof hit.created_at_i === 'number' ? hit.created_at_i * 1000 : 0),
+        // Algolia 的 story_text / comment_text 是 HTML 片段
+        summary: plainText(str(hit.story_text) || str(hit.comment_text)) || undefined,
         extra: { ...hit },
       }
     })
@@ -165,7 +193,8 @@ function devtoArticles(legacy: unknown): FeedSlice | undefined {
   if (!Array.isArray(legacy)) return undefined
   let maxMs = 0
   const items = (legacy as Array<Record<string, unknown>>).map((article) => {
-    const parsed = Date.parse(str(article.published_at))
+    const publishedAt = str(article.published_at)
+    const parsed = Date.parse(publishedAt)
     if (Number.isFinite(parsed) && parsed > maxMs) maxMs = parsed
     return {
       title: str(article.title),
@@ -175,6 +204,9 @@ function devtoArticles(legacy: unknown): FeedSlice | undefined {
           ? String(article.positive_reactions_count)
           : '0',
       cover: str(article.cover_image) || undefined,
+      date: isoOpt(str(publishedAt)),
+      // dev.to 的 description 是 HTML
+      summary: plainText(str(article.description)) || undefined,
       extra: { ...article },
     }
   })
@@ -200,6 +232,7 @@ function gitlabCommits(legacy: unknown, target: Target): FeedSlice | undefined {
         str(commit.web_url) ||
         (shortId.length > 0 && project.length > 0 ? `https://gitlab.com/${project}/-/commit/${shortId}` : ''),
       hot_value: '0',
+      date: isoOpt(str(commit.committed_date) || str(commit.created_at)),
       extra: { ...commit },
     }
   })
@@ -222,6 +255,9 @@ function lobstersSlice(op: string): Extractor {
         title: str(story.title),
         url: str(story.url) || (shortId.length > 0 ? `https://lobste.rs/s/${shortId}` : ''),
         hot_value: typeof story.score === 'number' ? String(story.score) : '0',
+        date: isoOpt(str(story.created_at)),
+        // lobste.rs 的 description 是 HTML
+        summary: plainText(str(story.description)) || undefined,
         extra: { ...story },
       }
     })
@@ -261,6 +297,12 @@ function openmeteoHourly(legacy: unknown): FeedSlice | undefined {
       title: at,
       url: '',
       hot_value: '0',
+      // 故意不给 date：`at` 是本地时区串（timezone=auto 下无偏移），转不成可靠时刻。
+      // XML 层会回落到 feed 级时间，好过在 pubDate 里写一个错时区的值
+      summary:
+        Object.entries(values)
+          .map(([variable, value]) => `${variable}: ${String(value)}`)
+          .join(', ') || undefined,
       extra: { time: at, values },
     })
   }
@@ -285,6 +327,9 @@ function usgsSearch(legacy: unknown): FeedSlice | undefined {
       title: str(props.title) || str(props.place) || '',
       url: str(props.url),
       hot_value: typeof props.mag === 'number' ? String(props.mag) : '0',
+      // USGS 给的是毫秒
+      date: isoOpt(typeof raw === 'number' ? raw : 0),
+      summary: str(props.place) || undefined,
       extra: { ...feature },
     }
   })
@@ -316,19 +361,19 @@ const EXTRACTORS: Record<string, Extractor> = {
 }
 
 /**
- * 把 feed 端点的 legacy 输出（透传上游 JSON 或 transform 信封）整形为
- * uapis.cn `misc/hotboard` 兼容结构：
- * `{ type, update_time, list: [{ index, title, url, hot_value, cover?, extra }], ...originTop }`。
- * 非 feed 端点或解析失败返回 undefined（原样保留）。
+ * feed 端点的统一落库前整形入口：按 `format` 分发到 uapis.cn hotboard / RSS 2.0 / Atom 1.0。
+ * `original`、非 feed 端点、无提取器或解析失败一律返回 undefined（原样保留字节）。
  */
-export function reshapeToHotboard(
-  providerName: string,
+export function reshapeFeed(
+  provider: ProviderDef,
   endpoint: EndpointDef,
   target: Target,
   legacyText: string,
 ): TransformResult | undefined {
   if (endpoint.resource !== 'feed') return undefined
-  const extract = EXTRACTORS[`${providerName}:${endpoint.op}`]
+  const format = resolveFormat(target)
+  if (format === 'original') return undefined
+  const extract = EXTRACTORS[`${provider.name}:${endpoint.op}`]
   if (extract === undefined) return undefined
 
   let legacy: unknown
@@ -339,6 +384,18 @@ export function reshapeToHotboard(
   }
   const slice = extract(legacy, target)
   if (slice === undefined) return undefined
+
+  if (format === 'rss' || format === 'atom') {
+    const ctx: FeedXmlContext = {
+      providerName: provider.name,
+      displayName: provider.displayName,
+      hosts: provider.hosts,
+      op: endpoint.op,
+      id: target.id,
+      query: target.query,
+    }
+    return format === 'rss' ? toRss(slice, ctx) : toAtom(slice, ctx)
+  }
 
   const list: Array<Record<string, unknown>> = slice.items.map((item, i) => ({
     index: i + 1,
@@ -356,6 +413,6 @@ export function reshapeToHotboard(
       list,
       ...(slice.top ?? {}),
     }),
-    contentType: 'application/json; charset=utf-8',
+    contentType: JSON_CT,
   }
 }
