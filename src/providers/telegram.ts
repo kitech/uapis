@@ -32,6 +32,12 @@ import type { TransformResult, UpstreamPlan, ProviderRuntime } from './runtime'
  * 4. **页面是倒序的。** `t.me/s/` DOM 里旧帖在上、最新在末尾（时间正序），
  *    snscrape 和 skraper 都用 `reversed()` 处理。`reversed()` 后输出最新在前，
  *    与页面"新帖置顶"观感一致（已在部署节点对真实页面验证）。
+ * 5. **class 属性里带第二个类名。** 真实标记是
+ *    `<div class="tgme_widget_message_text js-message_text" dir="auto">`，
+ *    写死 `/class="tgme_widget_message_text"/` **匹配不到任何东西**——线上实测
+ *    `text` 恒为空，而 `views`/`date`/`subscribers` 正常（那些标签本来就单类名）。
+ *    线上测出来的、单测没抓到的原因：夹具写的是没有多余类名的"好看版"标记。
+ *    一律按"类名列表含目标类"匹配（`class="[^"]*\btgme_widget_message_text\b[^"]*"`）。
  *
  * **limit 上限只有 20**：一页就是约 20 条，而 `UpstreamPlan` 只支持单个 url
  * （见 `runtime.ts`），框架层没有多请求编排能力。要 N>20 条就得改
@@ -206,8 +212,10 @@ function parsePosts(html: string, limit: number): ChannelPost[] {
     const post: ChannelPost = {
       id,
       date: firstMatch(block, /<time[^>]*datetime="([^"]*)"/),
+      // 坑 5：class 属性带第二个类名（js-message_text），必须按"类名列表含目标类"
+      // 匹配，写死 class="X" 匹配不到——线上 text 曾恒为空，见文件头。
       // 保守实现：正文遇内嵌 <div>（如引用回复块）会在首个 </div> 截断，属刻意取舍
-      text: firstMatch(block, /class="tgme_widget_message_text"[^>]*>([\s\S]*?)<\/div>/)
+      text: firstMatch(block, /class="[^"]*\btgme_widget_message_text\b[^"]*"[^>]*>([\s\S]*?)<\/div>/)
         ?.replace(/<br\s*\/?>/gi, '\n')
         .replace(/<[^>]*>/g, '')
         // 刻意的链式解码取舍：&amp;lt; 会被二次解成 <，正文以 JSON 下发，无注入风险
@@ -220,7 +228,7 @@ function parsePosts(html: string, limit: number): ChannelPost[] {
       views: views === undefined ? undefined : parseCount(views),
       has_photo: block.includes('tgme_widget_message_photo_wrap') || undefined,
       has_video: block.includes('tgme_widget_message_video_player') || undefined,
-      forwarded_from: firstMatch(block, /class="tgme_widget_message_forwarded_from_name"[^>]*>\s*(?:<[^>]*>)*([^<]+)/)?.trim(),
+      forwarded_from: firstMatch(block, /class="[^"]*\btgme_widget_message_forwarded_from_name\b[^"]*"[^>]*>\s*(?:<[^>]*>)*([^<]+)/)?.trim(),
       url: channel === undefined ? '' : `https://t.me/${channel}/${id}`,
     }
     for (const key of Object.keys(post) as (keyof ChannelPost)[]) {

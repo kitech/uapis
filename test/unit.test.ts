@@ -1672,6 +1672,31 @@ describe('Telegram（t.me/s/ 公开预览，零凭据）', () => {
     expect(out.title).toBe('Pavel Durov')
   })
 
+  it('正文 class 带第二个类名时仍能提取（坑 5：线上 text 曾恒为空）', () => {
+    const rt = runtimeFor('telegram')!
+    // 真实标记是 class="tgme_widget_message_text js-message_text" dir="auto"，
+    // 而 class="tgme_widget_message_text" 这个子串根本不在页面里。
+    // 这条是线上拉取测试抓出来的：text 字段整个缺失，views/date 却正常
+    // （那两个标签本来就单类名），单测夹具当时写的是没有多余类名的"好看版"。
+    const post = (cls: string): string =>
+      '<div class="tgme_widget_message_wrap">' +
+      '<div class="tgme_widget_message" data-post="c/7">' +
+      `<div class="${cls}" dir="auto">hello <b>world</b><br>second line</div>` +
+      '</div></div>'
+    for (const cls of [
+      'tgme_widget_message_text js-message_text',
+      // 类名顺序不固定时也要认，不能只认"第一个是目标类"
+      'js-message_text tgme_widget_message_text',
+      'tgme_widget_message_text',
+    ]) {
+      const out = JSON.parse(
+        rt.transform!(tgHeader() + post(cls), { op: 'channel', id: 'c', query: [] }).text,
+      )
+      // <b> 剥标签、<br> 转成换行
+      expect(out.posts[0]!.text, cls).toBe('hello world\nsecond line')
+    }
+  })
+
   it('quota 与 host 都进了默认值', async () => {
     expect((await readCredits(env, 'telegram', 'default')).limit).toBe(5000)
     expect(ALLOWLIST).toContain('t.me')
@@ -1949,7 +1974,14 @@ function mdItem(
   )
 }
 
-/** t.me/s/ 的频道元信息块，缺它即视为无公开预览（坑 1 的判据） */
+/**
+ * t.me/s/ 的频道元信息块，缺它即视为无公开预览（坑 1 的判据）
+ *
+ * 只照抄**线上已证实**的标记，不要"顺手补全"：header / title / username / views
+ * 这些在线上都能解析出来，说明真实页面里它们就是单类名、`title` 的 span 也没有
+ * 属性；给它们补上 `js-*` 第二个类反而会让生产代码的正则失配（等于自造一个假故障）。
+ * 唯一与旧夹具不同、且有据可依的是正文 div 多了 `js-message_text`（坑 5）。
+ */
 function tgHeader(): string {
   return (
     '<div class="tgme_channel_info">' +
@@ -1965,7 +1997,9 @@ function tgHeader(): string {
 function tgPost(channel: string, id: number, text: string, views?: string): string {
   return (
     `<div class="tgme_widget_message_wrap"><div class="tgme_widget_message" data-post="${channel}/${id}">` +
-    `<div class="tgme_widget_message_text">${text}</div>` +
+    // 真实标记是 `class="tgme_widget_message_text js-message_text" dir="auto"`，
+    // 写死单类名匹配不到（坑 5：线上 text 恒为空就是漏在这里）
+    `<div class="tgme_widget_message_text js-message_text" dir="auto">${text}</div>` +
     (views === undefined ? '' : `<span class="tgme_widget_message_views">${views}</span>`) +
     '<a class="tgme_widget_message_date"><time datetime="2026-09-29T10:00:00+00:00"></time></a>' +
     '</div></div>'
