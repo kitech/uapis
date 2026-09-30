@@ -11,6 +11,7 @@ import { buildCacheKey, policyFor, type Resource } from './ttl'
 import type { ProxyChannel } from './fetcher'
 import type { Target } from './target'
 import { logError } from './logger'
+import { resolveFormat, reshapeToHotboard } from './uapis'
 
 export function cacheKeyFor(provider: string, resource: Resource, target: Target): string {
   return buildCacheKey(provider, resource, target.op, target.id, target.query)
@@ -135,6 +136,16 @@ export async function refreshTarget(
     const result = runtime.transform(text, target)
     text = result.text
     contentType = result.contentType
+  }
+
+  // format=uapis（默认）：feed 端点统一整形为 uapis.cn hotboard 结构。
+  // format=original 或未声明提取器的 feed 则零改动；缓存键已含 format，两种形态各自分桶。
+  if (endpoint.resource === 'feed' && resolveFormat(target) === 'uapis') {
+    const reshaped = reshapeToHotboard(providerName, endpoint, target, text)
+    if (reshaped !== undefined) {
+      text = reshaped.text
+      contentType = reshaped.contentType
+    }
   }
 
   const policy = policyFor(endpoint.resource)

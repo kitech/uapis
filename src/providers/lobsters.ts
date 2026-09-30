@@ -1,4 +1,5 @@
 import { ErrorCode, fail } from '../core/errors'
+import { FORMAT_PARAM } from '../core/uapis'
 import type { ParamDef, ProviderDef } from '../core/registry'
 import type { UpstreamPlan, ProviderRuntime } from './runtime'
 
@@ -12,10 +13,11 @@ const TAG_PATTERN = /^[a-z0-9][a-z0-9-]{0,30}$/
 const SHORT_ID_PATTERN = /^[0-9a-z]{4,10}$/
 
 export const params: Record<string, ParamDef[]> = {
-  hot: [],
-  newest: [],
+  hot: [FORMAT_PARAM],
+  newest: [FORMAT_PARAM],
   tag: [
     { name: 'tag', in: 'path', type: 'string', required: true, description: '标签，如 programming / rust' },
+    FORMAT_PARAM,
   ],
   story: [
     { name: 'id', in: 'path', type: 'string', required: true, description: '故事的 short_id（站点用的短 base36 id）' },

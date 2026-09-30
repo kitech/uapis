@@ -14,6 +14,8 @@ export interface ParamDef {
   maxLength?: number
   minimum?: number
   maximum?: number
+  /** 字符串参数允许的取值白名单，出界即 400 */
+  enum?: string[]
   /**
    * 仅 path 参数：值允许包含 `/`（如付费墙文章的 `finance/2026/01/01/slug`）。
    * 路由生成时对应 Hono 的 `:name{.+}`，单段参数默认不跨 `/`。

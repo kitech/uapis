@@ -1,4 +1,5 @@
 import { ErrorCode, fail } from '../core/errors'
+import { FORMAT_PARAM } from '../core/uapis'
 import { queryValue } from '../core/target'
 import type { ParamDef, ProviderDef } from '../core/registry'
 import type { TransformResult, UpstreamPlan, ProviderRuntime } from './runtime'
@@ -40,6 +41,7 @@ export const params: Record<string, ParamDef[]> = {
   catalog: [
     { name: 'board', in: 'path', type: 'string', required: true, description: '板块名，如 g / pol / a', maxLength: 8 },
     { name: 'limit', in: 'query', type: 'integer', required: false, description: '返回前 N 个 OP，1-100', default: '25', minimum: 1, maximum: 100 },
+    FORMAT_PARAM,
   ],
 }
 

@@ -1,4 +1,5 @@
 import { ErrorCode, fail } from '../core/errors'
+import { FORMAT_PARAM } from '../core/uapis'
 import { queryValue } from '../core/target'
 import type { ParamDef, ProviderDef } from '../core/registry'
 import type { UpstreamPlan, ProviderRuntime } from './runtime'
@@ -29,6 +30,7 @@ export const params: Record<string, ParamDef[]> = {
     { name: 'minmagnitude', in: 'query', type: 'number', required: false, description: '最小震级，0-10（可含小数）', default: '2.5', minimum: 0, maximum: 10 },
     { name: 'limit', in: 'query', type: 'integer', required: false, description: '最多返回多少条，1-200', default: '20', minimum: 1, maximum: 200 },
     { name: 'orderby', in: 'query', type: 'string', required: false, description: 'time/magnitude', default: 'time' },
+    FORMAT_PARAM,
   ],
   event: [
     { name: 'id', in: 'path', type: 'string', required: true, description: '事件 id，如 ci41339847', maxLength: 20 },

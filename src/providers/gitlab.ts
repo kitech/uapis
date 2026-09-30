@@ -1,4 +1,5 @@
 import { ErrorCode, fail } from '../core/errors'
+import { FORMAT_PARAM } from '../core/uapis'
 import { queryValue } from '../core/target'
 import type { ParamDef, ProviderDef } from '../core/registry'
 import type { UpstreamPlan, ProviderRuntime } from './runtime'
@@ -36,6 +37,7 @@ export const params: Record<string, ParamDef[]> = {
     { name: 'project', in: 'query', type: 'string', required: true, description: '`namespace/project` 或数字项目 id', maxLength: 400 },
     { name: 'ref', in: 'query', type: 'string', required: false, description: '分支/标签/sha，默认项目默认分支', maxLength: 128 },
     { name: 'limit', in: 'query', type: 'integer', required: false, description: '条数，1-100', default: '20', minimum: 1, maximum: 100 },
+    FORMAT_PARAM,
   ],
 }
 

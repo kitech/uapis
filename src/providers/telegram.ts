@@ -1,4 +1,5 @@
 import { ErrorCode, fail } from '../core/errors'
+import { FORMAT_PARAM } from '../core/uapis'
 import { queryValue } from '../core/target'
 import type { ParamDef, ProviderDef } from '../core/registry'
 import type { TransformResult, UpstreamPlan, ProviderRuntime } from './runtime'
@@ -53,6 +54,7 @@ export const params: Record<string, ParamDef[]> = {
   channel: [
     { name: 'channel', in: 'path', type: 'string', required: true, description: '频道用户名，如 telegram / durov（不带 @）', maxLength: 32 },
     { name: 'limit', in: 'query', type: 'integer', required: false, description: '返回最近 N 条，1-20（单页上限）', default: '20', minimum: 1, maximum: MAX_LIMIT },
+    FORMAT_PARAM,
   ],
 }
 

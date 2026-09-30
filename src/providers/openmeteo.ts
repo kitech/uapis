@@ -1,4 +1,5 @@
 import { ErrorCode, fail } from '../core/errors'
+import { FORMAT_PARAM } from '../core/uapis'
 import { queryValue } from '../core/target'
 import type { Target } from '../core/target'
 import type { ParamDef, ProviderDef } from '../core/registry'
@@ -123,6 +124,7 @@ export const params: Record<string, ParamDef[]> = {
     { name: 'temperature_unit', in: 'query', type: 'string', required: false, description: 'celsius/fahrenheit', default: 'celsius' },
     { name: 'wind_speed_unit', in: 'query', type: 'string', required: false, description: 'kmh/ms/mph/kn', default: 'kmh' },
     { name: 'precipitation_unit', in: 'query', type: 'string', required: false, description: 'mm/inch', default: 'mm' },
+    FORMAT_PARAM,
   ],
   geocode: [
     { name: 'name', in: 'query', type: 'string', required: true, description: '地名，如 Wichita', maxLength: 100 },

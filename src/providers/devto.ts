@@ -1,4 +1,5 @@
 import { ErrorCode, fail } from '../core/errors'
+import { FORMAT_PARAM } from '../core/uapis'
 import { queryValue } from '../core/target'
 import type { Target } from '../core/target'
 import type { ParamDef, ProviderDef } from '../core/registry'
@@ -16,6 +17,7 @@ export const params: Record<string, ParamDef[]> = {
     { name: 'top', in: 'query', type: 'integer', required: false, description: 'state=top 时的天数窗口，1-999', minimum: 1, maximum: 999 },
     { name: 'page', in: 'query', type: 'integer', required: false, description: '页码，1 起（DEV.to 从 1 开始）', default: '1', minimum: 1, maximum: 30 },
     { name: 'per_page', in: 'query', type: 'integer', required: false, description: '每页条数，1-100', default: '30', minimum: 1, maximum: 100 },
+    FORMAT_PARAM,
   ],
   article: [
     { name: 'id', in: 'path', type: 'string', required: true, description: '文章 ID 或 slug' },

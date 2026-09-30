@@ -122,6 +122,12 @@ function validate(param: ParamDef, value: string): void {
       parameter: param.name,
     })
   }
+  if (param.enum !== undefined && !param.enum.includes(value)) {
+    throw fail(ErrorCode.InvalidParameter, `${param.name} must be one of: ${param.enum.join(', ')}`, 400, {
+      parameter: param.name,
+      enum: param.enum,
+    })
+  }
   if (parsed !== undefined) {
     if (param.minimum !== undefined && parsed < param.minimum) {
       throw fail(ErrorCode.InvalidParameter, `${param.name} below minimum`, 400, {

@@ -1,4 +1,5 @@
 import { ErrorCode, fail } from '../core/errors'
+import { FORMAT_PARAM } from '../core/uapis'
 import { queryValue } from '../core/target'
 import type { ParamDef, ProviderDef } from '../core/registry'
 import type { TransformResult, UpstreamPlan, ProviderRuntime } from './runtime'
@@ -81,10 +82,10 @@ const USER_PARAM: ParamDef = {
 }
 
 export const params: Record<string, ParamDef[]> = {
-  tag: [TAG_PARAM, LIMIT_PARAM],
-  publication: [PUBLICATION_PARAM, LIMIT_PARAM],
-  user: [USER_PARAM, LIMIT_PARAM],
-  tagged: [PUBLICATION_PARAM, TAG_PARAM, LIMIT_PARAM],
+  tag: [TAG_PARAM, LIMIT_PARAM, FORMAT_PARAM],
+  publication: [PUBLICATION_PARAM, LIMIT_PARAM, FORMAT_PARAM],
+  user: [USER_PARAM, LIMIT_PARAM, FORMAT_PARAM],
+  tagged: [PUBLICATION_PARAM, TAG_PARAM, LIMIT_PARAM, FORMAT_PARAM],
 }
 
 export const def: ProviderDef = {

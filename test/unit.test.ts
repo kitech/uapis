@@ -31,6 +31,7 @@ import { extractArticle } from '../src/providers/economist'
 import { egressHostsOf, providerByName } from '../src/core/registry'
 import { fetchUpstream, pickChannel } from '../src/core/fetcher'
 import { normalizeOrigin, siteUrlOf } from '../src/core/site'
+import { FORMAT_PARAM, resolveFormat, reshapeToHotboard } from '../src/core/uapis'
 
 /** miniflare 的 Cloudflare.Env 缺少 src/types.ts 里声明的 ADMIN_TOKEN，测试里做一次桥接 */
 const env = cloudflareEnv as unknown as Env
@@ -1983,3 +1984,228 @@ function tgChannel(count: number, withHeader = true): string {
   for (let i = 1; i <= count; i++) out += tgPost('c', i, `m${i}`)
   return out
 }
+
+describe('format=uapis（兼容 uapis.cn misc/hotboard 结构）', () => {
+  /** 走 provider transform 拿到 legacy 输出，再过整形器，模拟 refresh 的落库前链路 */
+  function reshape(
+    provider: string,
+    op: string,
+    id: string,
+    query: Array<[string, string]>,
+    legacy: string,
+  ): Record<string, unknown> {
+    const rt = runtimeFor(provider)!
+    let text = legacy
+    if (rt.transform !== undefined) {
+      text = rt.transform(legacy, { op, id, query }).text
+    }
+    const endpoint = allEndpoints().find(
+      (e) => e.provider.name === provider && e.endpoint.op === op,
+    )!.endpoint
+    const out = reshapeToHotboard(provider, endpoint, { op, id, query }, text)
+    expect(out).toBeDefined()
+    return JSON.parse(out!.text)
+  }
+
+  it('参数声明：16 个 feed 端点都带 format，默认 uapis、取值 original|uapis', () => {
+    const feeds = allEndpoints().filter((e) => e.endpoint.resource === 'feed')
+    expect(feeds.length).toBe(16)
+    for (const { provider, endpoint } of feeds) {
+      const param = endpoint.params.find((p) => p.name === 'format')
+      expect(param, `${provider.name}:${endpoint.op}`).toBeDefined()
+      expect(param).toEqual(FORMAT_PARAM)
+      expect(param!.in).toBe('query')
+      expect(param!.default).toBe('uapis')
+      expect(param!.enum).toEqual(['original', 'uapis'])
+    }
+    // 非 feed 端点不声明该参数
+    for (const { provider, endpoint } of allEndpoints().filter(
+      (e) => e.endpoint.resource !== 'feed',
+    )) {
+      expect(
+        endpoint.params.some((p) => p.name === 'format'),
+        `${provider.name}:${endpoint.op}`,
+      ).toBe(false)
+    }
+  })
+
+  it('resolveFormat：缺省与 uapis 都走兼容结构，只有 original 走原结构', () => {
+    expect(resolveFormat({ op: 'catalog', id: 'g', query: [] })).toBe('uapis')
+    expect(resolveFormat({ op: 'catalog', id: 'g', query: [['format', 'uapis']] })).toBe('uapis')
+    expect(resolveFormat({ op: 'catalog', id: 'g', query: [['format', 'original']] })).toBe(
+      'original',
+    )
+  })
+
+  it('缓存键按 format 分桶：两种形态不会互相污染', () => {
+    const key = (format: string) =>
+      buildCacheKey('usgs', 'feed', { op: 'search', id: '', query: [['format', format]] })
+    expect(key('uapis')).not.toBe(key('original'))
+    expect(key('uapis')).toContain('format=uapis')
+    expect(key('original')).toContain('format=original')
+  })
+
+  it('fourchan catalog：hotboard 键位 + replies 作热度 + extra 保真 + thread 链接', () => {
+    const out = reshape('fourchan', 'catalog', 'g', [['limit', '2']], JSON.stringify([
+      { page: 1, threads: [{ no: 3, replies: 7, sub: 'hello', last_modified: 1759000000 }] },
+    ]))
+    expect(out.type).toBe('fourchan:g')
+    expect(out.update_time).toBe(new Date(1759000000 * 1000).toISOString())
+    const list = out.list as Array<Record<string, unknown>>
+    expect(list).toHaveLength(1)
+    expect(list[0]!.index).toBe(1)
+    expect(list[0]!.title).toBe('hello')
+    expect(list[0]!.url).toBe('https://boards.4chan.org/g/thread/3')
+    expect(list[0]!.hot_value).toBe('7')
+    expect(list[0]!.extra).toEqual({ no: 3, replies: 7, sub: 'hello', last_modified: 1759000000 })
+  })
+
+  it('fourchan 无标题贴兜底 Thread #no，缺 replies 热度记 0', () => {
+    const out = reshape('fourchan', 'catalog', 'pol', [], JSON.stringify([
+      { page: 1, threads: [{ no: 12 }] },
+    ]))
+    const list = out.list as Array<Record<string, unknown>>
+    expect(list[0]!.title).toBe('Thread #12')
+    expect(list[0]!.hot_value).toBe('0')
+  })
+
+  it('telegram channel：正文作标题、views 作字符串热度、channel 升到顶层', () => {
+    const out = reshape('telegram', 'channel', 'telegram', [['limit', '2']], tgChannel(2))
+    // type 用请求的频道名，channel 用页面头部解析出的值（两者可以不同）
+    expect(out.type).toBe('telegram:telegram')
+    expect(out.channel).toBe('telegram')
+    expect(out.title).toBe('Telegram')
+    const list = out.list as Array<Record<string, unknown>>
+    expect(list).toHaveLength(2)
+    // 坑 4：reverse 后最新在前
+    expect(list[0]!.index).toBe(1)
+    expect(list[0]!.title).toBe('m2')
+    expect(list[0]!.url).toBe('https://t.me/c/2')
+    expect(list[0]!.hot_value).toBe('0')
+    expect((list[0]!.extra as Record<string, unknown>).id).toBe(2)
+  })
+
+  it('medium tag：热度恒 0，封面走 cover，RFC-822 的 updated 转成 ISO', () => {
+    const out = reshape(
+      'medium',
+      'tag',
+      'programming',
+      [['limit', '1']],
+      mdFeed([mdItem({ title: 'p1', content: '<p><img src="https://img.example/i1.png"></p>' })]),
+    )
+    expect(out.type).toBe('medium:tag:programming')
+    expect(out.title).toBe('Programming on Medium')
+    // Medium 的 lastBuildDate 是 RFC-822，uapis.cn 的 update_time 约定 ISO 8601
+    expect(out.update_time).toBe(new Date('Fri, 02 Jun 2026 16:53:18 GMT').toISOString())
+    const list = out.list as Array<Record<string, unknown>>
+    expect(list[0]!.title).toBe('p1')
+    expect(list[0]!.url).toBe('https://medium.com/p/36024bdb36c6')
+    expect(list[0]!.hot_value).toBe('0')
+    expect(list[0]!.cover).toBe('https://img.example/i1.png')
+  })
+
+  it('透传源同样被整形：devto 用 reactions 作热度，usgs 用 mag', () => {
+    const devto = reshape('devto', 'articles', '', [], JSON.stringify([
+      { title: 'a1', url: 'https://dev.to/a1', positive_reactions_count: 42, published_at: '2026-09-29T10:00:00Z' },
+    ]))
+    expect(devto.type).toBe('devto:articles')
+    expect(devto.update_time).toBe('2026-09-29T10:00:00.000Z')
+    const d0 = (devto.list as Array<Record<string, unknown>>)[0]!
+    expect(d0.hot_value).toBe('42')
+    expect(d0.url).toBe('https://dev.to/a1')
+
+    const usgs = reshape('usgs', 'search', '', [], JSON.stringify({
+      type: 'FeatureCollection',
+      metadata: { generated: 1 },
+      features: [
+        { type: 'Feature', properties: { mag: 4.5, place: 'X', time: 1759000000000 }, geometry: null },
+      ],
+    }))
+    // 上游的 type=FeatureCollection 让位给我们的 type，metadata 仍保真
+    expect(usgs.type).toBe('usgs:search')
+    expect(usgs.metadata).toEqual({ generated: 1 })
+    expect(usgs.update_time).toBe(new Date(1759000000000).toISOString())
+    const u0 = (usgs.list as Array<Record<string, unknown>>)[0]!
+    expect(u0.hot_value).toBe('4.5')
+    expect(u0.title).toBe('X')
+    expect(u0.extra).toMatchObject({ type: 'Feature', geometry: null })
+  })
+
+  it('hackernews front：无外链条目兜底站内链接，points 作热度', () => {
+    const out = reshape('hackernews', 'front', '', [], JSON.stringify({
+      hits: [
+        { objectID: '1', title: 'Show HN', url: 'https://x.example/1', points: 12, created_at_i: 1759000000 },
+        { objectID: '2', story_title: 'ask hn', points: 3, created_at_i: 1759000001 },
+      ],
+      nbHits: 2,
+    }))
+    expect(out.type).toBe('hackernews:front')
+    expect(out.nbHits).toBe(2)
+    const list = out.list as Array<Record<string, unknown>>
+    expect(list[1]!.url).toBe('https://news.ycombinator.com/item?id=2')
+    expect(list[1]!.title).toBe('ask hn')
+    expect(list[1]!.hot_value).toBe('3')
+  })
+
+  it('gitlab commits / lobsters / openmeteo 三个源的热度与键位', () => {
+    const gitlab = reshape('gitlab', 'commits', '', [['project', 'g/p']], JSON.stringify([
+      { id: 'abc', short_id: 'abc1234', title: 'fix: x', message: 'fix: x\n\nbody', web_url: 'https://gitlab.com/g/p/-/commit/abc', committed_date: '2026-09-29T10:00:00Z' },
+    ]))
+    const g0 = (gitlab.list as Array<Record<string, unknown>>)[0]!
+    expect(gitlab.type).toBe('gitlab:commits')
+    expect(g0.title).toBe('fix: x')
+    expect(g0.hot_value).toBe('0')
+    expect(g0.url).toBe('https://gitlab.com/g/p/-/commit/abc')
+
+    const lob = reshape('lobsters', 'hot', '', [], JSON.stringify([
+      { short_id: 'ab12', title: 'rust', url: 'https://l.example/ab12', score: 9, created_at: '2026-09-29T10:00:00Z' },
+    ]))
+    const l0 = (lob.list as Array<Record<string, unknown>>)[0]!
+    expect(lob.type).toBe('lobsters:hot')
+    expect(l0.hot_value).toBe('9')
+
+    const meteo = reshape('openmeteo', 'hourly', '', [], JSON.stringify({
+      latitude: 37.1,
+      hourly: { time: ['2026-09-29T10:00'], temperature_2m: [21.5] },
+      hourly_units: { temperature_2m: '°C' },
+    }))
+    expect(meteo.type).toBe('openmeteo:hourly')
+    expect(meteo.hourly_units).toEqual({ temperature_2m: '°C' })
+    const m0 = (meteo.list as Array<Record<string, unknown>>)[0]!
+    // 一个时刻一条，变量收在 extra.values（逐变量展开会把 20KB 上游撑成几百 KB）
+    expect(m0.title).toBe('2026-09-29T10:00')
+    expect(m0.url).toBe('')
+    expect(m0.hot_value).toBe('0')
+    expect(m0.extra).toEqual({ time: '2026-09-29T10:00', values: { temperature_2m: 21.5 } })
+  })
+
+  it('非 feed 端点与坏结构一律不动：undefined 表示原样落库', () => {
+    const usgsEvent = allEndpoints().find(
+      (e) => e.provider.name === 'usgs' && e.endpoint.op === 'event',
+    )!.endpoint
+    expect(
+      reshapeToHotboard('usgs', usgsEvent, { op: 'event', id: 'ci1', query: [] }, '{}'),
+    ).toBeUndefined()
+    const devtoArticles = allEndpoints().find(
+      (e) => e.provider.name === 'devto' && e.endpoint.op === 'articles',
+    )!.endpoint
+    // 上游非 JSON / 结构不符：整形器放弃，绝不产出空 list 覆盖原始内容
+    expect(
+      reshapeToHotboard('devto', devtoArticles, { op: 'articles', id: '', query: [] }, 'not json'),
+    ).toBeUndefined()
+    expect(
+      reshapeToHotboard('devto', devtoArticles, { op: 'articles', id: '', query: [] }, '{}'),
+    ).toBeUndefined()
+  })
+
+  it('index 从 1 连续编号，条目顺序与原输出完全一致（不重排）', () => {
+    const out = reshape('lobsters', 'newest', '', [], JSON.stringify([
+      { short_id: 'a1', title: 'first', score: 1 },
+      { short_id: 'b2', title: 'second', score: 2 },
+      { short_id: 'c3', title: 'third', score: 3 },
+    ]))
+    const list = out.list as Array<Record<string, unknown>>
+    expect(list.map((i) => i.index)).toEqual([1, 2, 3])
+    expect(list.map((i) => i.title)).toEqual(['first', 'second', 'third'])
+  })
+})

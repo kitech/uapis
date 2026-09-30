@@ -1,4 +1,5 @@
 import { ErrorCode, fail } from '../core/errors'
+import { FORMAT_PARAM } from '../core/uapis'
 import { queryValue } from '../core/target'
 import type { Target } from '../core/target'
 import type { ProviderDef } from '../core/registry'
@@ -66,6 +67,7 @@ export const def: ProviderDef = {
       params: [
         { name: 'hitsPerPage', in: 'query', type: 'integer', required: false, description: '每页条数，1-100', default: '20', minimum: 1, maximum: 100 },
         { name: 'page', in: 'query', type: 'integer', required: false, description: '页码，0 起', default: '0', minimum: 0, maximum: 10 },
+        FORMAT_PARAM,
       ],
       passthrough: true,
       inline: true,
@@ -81,6 +83,7 @@ export const def: ProviderDef = {
         { name: 'tags', in: 'query', type: 'string', required: false, description: 'Algolia tags，默认 story' },
         { name: 'hitsPerPage', in: 'query', type: 'integer', required: false, description: '每页条数，1-100', default: '20', minimum: 1, maximum: 100 },
         { name: 'page', in: 'query', type: 'integer', required: false, description: '页码，0 起', default: '0', minimum: 0, maximum: 10 },
+        FORMAT_PARAM,
       ],
       passthrough: true,
       inline: true,
@@ -97,6 +100,7 @@ export const def: ProviderDef = {
         { name: 'query', in: 'query', type: 'string', required: false, description: '在该用户的条目里再做关键词过滤' },
         { name: 'hitsPerPage', in: 'query', type: 'integer', required: false, description: '每页条数，1-100', default: '20', minimum: 1, maximum: 100 },
         { name: 'page', in: 'query', type: 'integer', required: false, description: '页码，0 起', default: '0', minimum: 0, maximum: 10 },
+        FORMAT_PARAM,
       ],
       passthrough: true,
       inline: true,
