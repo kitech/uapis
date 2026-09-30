@@ -51,9 +51,15 @@ hero:
 | crates | `search`、`crate/{name}`、`crate/{name}/{version}` | 无 |
 | musicbrainz | `search`、`artist/{mbid}`、`release/{mbid}`、`release-group/{mbid}` | 无 |
 | openmeteo | `current`、`hourly`、`geocode`、`air-quality` | 无 |
+| medium | `tag/{tag}`、`publication/{publication}`、`user/{user}`、`tagged/{publication}/{tag}` | 无 |
+| telegram | `channel/{channel}` | 无 |
+| fourchan | `catalog/{board}` | 无（⚠️ 4chan 风控拒绝 Workers 出口，当前 403） |
 
-17 个数据源 / 54 个端点里，**只有 Stack Exchange 的 6 个端点必须配 key**（`/sites` 除外），
+20 个数据源 / 60 个端点里，**只有 Stack Exchange 的 6 个端点必须配 key**（`/sites` 除外），
 其余全是零 key 源。完整参数见 [数据源与凭据](/guide/providers) 或 `/openapi.json`。
+
+其中 16 个 feed 端点额外支持 `format` 参数，可在 `uapis`（默认）、`original`、
+`rss`、`atom` 四种形态间选择，见[输出格式](/guide/providers#输出格式)。
 
 ## 快速预览
 

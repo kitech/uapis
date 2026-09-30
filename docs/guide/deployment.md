@@ -16,7 +16,7 @@
 ```bash
 npm install
 npm run typecheck     # tsc --noEmit
-npm test              # 240 个离线用例，不发真实请求
+npm test              # 359 个离线用例，不发真实请求
 npm run deploy:dry    # 构建文档 + dry-run，产物约 245 KiB（gzip 约 57 KiB，58 个文件）
 ```
 

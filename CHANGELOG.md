@@ -6,6 +6,36 @@
 
 ### Added
 
+- **feed 端点的 `format` 参数**（`src/core/uapis.ts` + `src/core/feedxml.ts`）：
+  16 个 feed 端点（9 个 provider）可显式选择响应形态，取值
+  `original`（上游原样）/ `uapis`（默认，归一化业务 JSON）/ `rss`（RSS 2.0）/
+  `atom`（Atom 1.0）。此前只有透传与归一化两种，订阅器要 RSS/Atom 只能自己在
+  客户端转
+- **RSS/Atom 严格按标准字段输出，不加 `uapis:` 命名空间**。代价是
+  `hot_value`、`cover`、`extra` 全部丢失：前两者是本项目产物，XML 里没有对应
+  标准字段；封面即使想给也拿不到——RSS 2.0 没有 item 级图片元素，`enclosure`
+  又强制要 `length` + `type` 两个都无从得知的字段。加自定义命名空间的收益是
+  留住字段，代价是通用订阅器读不懂，不划算
+- **日期与摘要逐 provider 映射**：`date` 映射到 RSS `pubDate`（RFC-822）与
+  Atom `updated`（RFC-3339），两者都带时区；`summary` 来自 medium excerpt、
+  Hacker News `story_text`/`comment_text`、devto 与 lobsters `description`、
+  USGS place、Open-Meteo `变量: 值`
+- `openmeteo/hourly` **故意不产出日期**：上游给的是不带偏移的本地时刻，
+  补一个偏移就是编造时间
+- **Atom feed `<id>` 带 query 段**（`urn:uapis:<provider>:<op>:<id>:<hash>`）。
+  `usgs/earthquakes`、`gitlab/commits`、`openmeteo/hourly`、`hackernews/front`
+  这四个端点的路径参数参与不到 id 里，只拼 `provider:op:id` 会让
+  `minmagnitude=2.5` 和 `4.5` 产出同一个 id——两份内容不同、id 却撞车的文档。
+  query 段复用 `hashPairs`（先 sort，顺序无关，且与缓存键口径一致），`format`
+  不参与：同一 feed 的两种序列化本就该共用一个 id
+- **RSS 侧刻意不做对应的事**：RSS 2.0 的 channel 没有 `id` 元素，身份由指向站点的
+  `<link>` 承担，跨查询恒定正合规范。不为了对称硬塞 `atom:link`
+- **XML 硬化**：剔除 XML 1.0 不允许的码点与孤立代理项（成对 emoji 不受影响）、
+  文本与属性分别转义、`&` 先于其它实体处理、标题截 2000 / 摘要截 1000 且
+  **先截断再转义**。feed 里的 HTML 一律降为纯文本，`script`/`style` 整块丢弃
+  （只去标签不删内容等于把脚本代码当正文输出）
+- 同一 feed 内 URL 重复时 item id 退回 `urn:…:item:<序号>`，不产出重复的
+  `<id>` / `<guid>`。四个 provider 都不去重（medium 在 provider 层去了）
 - **表结构改由 Worker 代码自举**（`src/core/bootstrap.ts` 的 `ensureSchema`）：
   挂在请求中间件、cron 和 `/healthz` 三个触发点上，检测到缺表就把 schema 装好。
   部署后第一个请求即建表，不再需要任何手工迁移步骤

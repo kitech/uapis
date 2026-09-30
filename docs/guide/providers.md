@@ -417,6 +417,77 @@ curl "https://<你的域名>/api/v1/github/android/rising?since=2026-08-28&per_p
 - **合规前提**：只适合条款允许代理转发/引用的源。接任何 tier C 源之前，
   先自己读一遍它的 `tos`；只做标题与摘要这类元数据，不搬运正文
 
+## 4chan / 4board · tier A
+
+上游：`https://a.4cdn.org`，官方只读 JSON API，**零 key**。
+
+| 方法 | 路径 | 参数 |
+| --- | --- | --- |
+| GET | `/api/v1/fourchan/catalog/{board}` | 路径 `board`：板块名 `^[a-z0-9]{1,8}$`（`g` / `pol` / `a`）；`limit`(1-100, 默认 25)；映射上游 `/<board>/catalog.json` |
+
+- ⚠️ **当前不可用**：本部署（Cloudflare Workers 出口）被 4chan 的 Cloudflare 风控
+  直接拒绝，实测四种格式一律 403，**与 UA 无关**。这是 4chan 侧的 IP 策略，不是
+  本项目的 bug；换出口或换部署形态才可能通。文档保留是为了说明端点契约，不是
+  保证可用
+- 上游 `catalog.json` 带分页包裹且体量大，**必须 transform**：取前 N 个 OP 后
+  按 bump 序输出。超过约 512KB 的板块（如 `/pol` ≈555KB）在回源时直接
+  `413 FILE_TOO_LARGE`——transform 只对体量以内的板块生效
+- 闸门 1000ms：官方要求每至多 1 请求/秒，这是硬性要求而非自我约束
+- 板块名白名单 `^[a-z0-9]{1,8}$`：形态合法但不存在的板块由上游回 404，
+  那是诚实的答案，不在我们这层猜成 400
+- 归属：各帖版权归发帖者所有
+
+## Telegram 公开频道 · tier A
+
+上游：`https://t.me`，解析**公开网页预览页** `t.me/s/<channel>`，**零 key**。
+
+| 方法 | 路径 | 参数 |
+| --- | --- | --- |
+| GET | `/api/v1/telegram/channel/{channel}` | 路径 `channel`：频道用户名 `^[A-Za-z][A-Za-z0-9_]{2,31}$`，**不带 `@`**（`telegram` / `durov`）；`limit`(1-20, 默认 20) |
+
+- **不需要 `api_id` / `api_hash`，也不需要登录**：走的是任何人打开浏览器都能看到的
+  公开预览页，不是 Bot API。私有频道一律拿不到
+- 上游是 **HTML**，必须 transform 成 JSON。频道标题取自
+  `class="tgme_channel_info_header_title"` 里套的 `<span>`，正文取自
+  `class="…tgme_widget_message_text…"`——**按 class 列表含目标类匹配，不能写死整个
+  class 串**：上游的 class 带 `js-message_text` 之类的附加类，写死
+  `/class="tgme_widget_message_text"/` 匹配不到任何东西（线上实测过），
+  而静默取空比匹配失败更糟，所以取不到就抛 502 让上层重试
+- 上游在频道正常时也会回「没找到消息」页（限流所致），这种情况同样按 502 处理
+- 预览页只给有限条数，`limit` 上界 20；单页之外没有分页参数
+- 闸门 1000ms。官方未公布预览页限流，这是**纯自我约束**
+- 归属：各帖版权归频道作者所有
+
+## Medium · tier A-
+
+上游：`https://medium.com`，官方公开 RSS 接口，**零 key**。
+
+| 方法 | 路径 | 参数 |
+| --- | --- | --- |
+| GET | `/api/v1/medium/tag/{tag}` | 路径 `tag`：`^[a-z0-9][a-z0-9-]{0,49}$`（`programming`）；`limit`(1-10, 默认 10) |
+| GET | `/api/v1/medium/publication/{publication}` | 路径 `publication`：同 `tag` 正则（如 `towards-data-science`） |
+| GET | `/api/v1/medium/user/{user}` | 路径 `user`：`^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._-]{0,49}$`，**不含 `@`** |
+| GET | `/api/v1/medium/tagged/{publication}/{tag}` | 两个路径参数，按 `/` 拼接；各自同上正则 |
+
+- **上游固定 10 条且不可分页**，所以 `limit` 上界就是 10。传入更大的值不报错，
+  但也不会多给条数——这是上游形态，不是我们的截断
+- 闸门 **2000ms**（比别处宽）：无官方数值，而 Cloudflare 对数据中心 IP 敏感，
+  社区实测并发拉 Medium feed 会吃 429；再低只会撞限流而换不来更高成功率
+- **`retries: 0`**：Medium 的限流是持续封锁，1.5s 退避救不回来，重试只会把
+  内联请求拖成 2× 超时
+- 只返回**纯文本摘要不返回正文**；付费文章仅给预览，`metered: true` 标记，
+  **不做任何绕过**
+- 上游被限流时会给「200 + 空 body」而不是报错，所以 0 items 一律抛 502 而非返回
+  空数组：空结果被缓存住意味着这个 tag 的热贴凭空消失，抛 502 至少让下次请求重试。
+  代价是真正冷清的 tag 也会 502——已知取舍
+- 限流不带 `Retry-After`，所以本地退避值是猜的，只能当保底
+- **不支持 `{user}.medium.com` 与自定义域 feed**：host 白名单是精确匹配，
+  放开就等于开了一条 SSRF
+- `tagged` 是 medium 内唯一的多段路径端点（`{publication}` 与 `{tag}` 用 `/` 拼），
+  拆出的两段各自要过正则；全仓库还有 crossref、economist、npm、gitlab/project
+  也是多段路径
+- 归属：各文章版权归作者所有，Medium 托管
+
 ## 配 key
 
 ```bash
@@ -448,6 +519,130 @@ curl -s https://<你的域名>/status | jq '.providers'
 ```
 
 公开的 `/status` 不需要鉴权，适合挂监控。
+
+## 输出格式
+
+16 个 feed 端点（9 个 provider）接受 `format` 查询参数，决定响应体的形态。
+其余 44 个端点没有这个参数，带上就是 400 `unknown query parameter: format`——
+**不做静默忽略**，理由见[设计决策](/reference/design-decisions)。
+
+| 取值 | 含义 | Content-Type |
+| --- | --- | --- |
+| `uapis` | **默认**。归一化后的业务 JSON，字段最全 | `application/json; charset=utf-8` |
+| `original` | 上游原样透传，不做任何解析 | 上游自己的类型 |
+| `rss` | RSS 2.0，严格用标准字段 | `application/rss+xml; charset=utf-8` |
+| `atom` | Atom 1.0，严格用标准字段 | `application/atom+xml; charset=utf-8` |
+
+```bash
+curl -i 'https://<你的域名>/api/v1/lobsters/hot?format=atom'
+```
+
+### 哪些端点支持
+
+| provider | 端点 |
+| --- | --- |
+| hackernews | `front`、`latest`、`user/{id}/posts` |
+| lobsters | `hot`、`newest`、`tag/{tag}` |
+| medium | `tag/{tag}`、`publication/{publication}`、`user/{user}`、`tagged/{publication}/{tag}` |
+| openmeteo | `hourly` |
+| usgs | `earthquakes` |
+| devto | `articles` |
+| gitlab | `commits` |
+| telegram | `channel/{channel}` |
+| fourchan | `catalog/{board}` |
+
+带 `format` 的端点正好是 `resource: 'feed'` 的那 16 个——分界线是**有没有条目列表可投影**，
+不是 `passthrough`。`hackernews` 的 `search`、`item/{id}`、`user/{id}` 都在其中缺席，
+因为它们的 `resource` 是 `search` / `item` / `profile`：单个对象或搜索结果，套进 RSS/Atom
+只会得到一个 item 包着整份 JSON，订阅器读起来是坏的。
+
+### 字段对照
+
+**默认的 `uapis` 才是字段最全的**，XML 是有损投影：
+
+| 字段 | `uapis` | `rss` / `atom` |
+| --- | --- | --- |
+| `title`、`url` | 有 | 有 |
+| `date`（时间戳） | 有 | 映射到 `pubDate` / `updated` |
+| `summary` | 有 | 映射到 `description` / `summary` |
+| `hot_value`（热度） | 有 | **丢** |
+| `cover`（封面图） | 有 | **丢**（原因见下） |
+| `extra`（上游原始 lossless 结构） | 有 | **丢** |
+
+封面必然丢：RSS 2.0 没有 item 级图片的标准元素，`enclosure` 又强制要求同时给
+`length` 和 `type`，而我们既不知道字节数也不知道 MIME。Atom 的 `<content>` 或
+`<link rel="enclosure">` 能承载，但我们不造自己拿不到的数据——**要封面用 `uapis`**。
+`hot_value` 和 `extra` 是本项目的产物，RSS/Atom 里没有对应标准字段，加自定义
+命名空间又会让通用订阅器读不懂，所以直接不输出。
+
+### 日期
+
+| 格式 | 元素 | 规范 |
+| --- | --- | --- |
+| `rss` | `<pubDate>` | RFC-822（`Wed, 30 Sep 2026 07:07:16 GMT`） |
+| `atom` | `<updated>` | RFC-3339（`2026-09-30T07:07:16.000Z`） |
+
+两者都带时区，不会产出裸本地时间。`openmeteo/hourly` **没有日期**——它给的是
+不带偏移的本地时刻，补一个偏移就是编造时间，所以留空而不是猜一个。
+
+摘要逐 provider 的来源不一样：medium 用 excerpt，Hacker News 用
+`story_text` / `comment_text`，devto 与 lobsters 用 `description`，USGS 用 place，
+Open-Meteo 是 `变量: 值`。fourchan、telegram、gitlab 没有可用的摘要字段，
+对应元素直接不输出。
+
+### id 与链接
+
+Atom 的 feed `<id>` 是 URN，**带 query 段**：
+
+```text
+urn:uapis:usgs:search:94fcfcf6        ← minmagnitude=2.5
+urn:uapis:usgs:search:d0b27b10        ← minmagnitude=4.5
+```
+
+必须带 query，是因为这四个端点的 `id` 都是空的，`op` 在同一 provider 内也不变，
+拼出来的 base 只有 provider 和 op：
+
+| 端点 | base | 区分查询的信息全在 query |
+| --- | --- | --- |
+| `usgs/earthquakes` | `urn:uapis:usgs:search` | `minmagnitude`、`orderby`、`limit` |
+| `gitlab/commits` | `urn:uapis:gitlab:commits` | `project`、`ref`、`limit` |
+| `openmeteo/hourly` | `urn:uapis:openmeteo:hourly` | `latitude`、`longitude`、`hourly` |
+| `hackernews/front` | `urn:uapis:hackernews:front` | `page`、`hitsPerPage` |
+
+不并进 query 段，`minmagnitude=2.5` 和 `4.5` 就会共用同一个 id——两份内容不同、
+id 却撞车的文档，违反 Atom 对 feed id 全局唯一的要求。query 段是排序后 query 的
+哈希，所以参数顺序不影响结果。`format` 不参与：同一个 feed 的 RSS 与 Atom 两种
+序列化本来就该共用一个 id。
+
+**RSS 侧刻意不做对应的事。** RSS 2.0 的 channel 根本没有 `id` 元素，身份由指向
+站点的 `<link>` 承担，跨查询恒定正合规范。硬塞一个 `atom:link` 只会让非 Atom
+订阅器看到不认识的元素。
+
+用 URN 而不是 URL，是因为这些 id 不指向任何可解引用的资源，写成 `https://…` 是
+撒谎；而且队列刷新拿不到请求，缓存字节也不该随访问域名变化。
+
+item 级：能拿到绝对 URL 就用它（RSS 的 `<guid isPermaLink="true">`、Atom 的
+`<id>`）；不是 http(s) 开头、或同一个 feed 内 URL 撞车时，退回
+`urn:uapis:<provider>:<op>:item:<序号>`——同一个 feed 内 `<id>` 重复会让 Atom
+校验器直接判文档不合法。
+
+### 缓存
+
+`format` 是缓存键的一部分，所以同一个 feed 的四种格式各占一桶、分别回源。
+`?format=rss` 命中不会顺带填好 `?format=uapis` 的缓存。要同时看两种就得各打一次。
+
+### 硬化
+
+- 剔除 XML 1.0 不允许的码点与孤立代理项，成对 emoji 不受影响
+- 标题截断到 2000 字符、摘要截断到 1000 字符，**先截断再转义**
+- 文本与属性分别转义，`&` 先于其它实体处理
+- feed 里的 HTML 一律降为纯文本：`script` / `style` 整块丢弃，实体解一次
+
+### 加新 feed 端点时
+
+在 `src/core/uapis.ts` 的 `reshapeFeed` 里写一条提取器，这个端点就自动获得四种
+格式。漏写提取器不会报错，而是让 `format=rss` 以 200 返回原始 JSON——比 400 更
+难发现，所以新增端点时记得同时补提取器与 `test/unit.test.ts` 的断言。
 
 ## 分页约定
 
