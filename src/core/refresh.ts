@@ -181,8 +181,15 @@ async function writeNegative(
   key: string,
   error: ApiError,
 ): Promise<boolean> {
-  const ttl = await getIntSetting(env, 'cache.negative_ttl')
-  const seconds = ttl > 0 ? ttl : 21_600
+  // 上游 429 已带 `retryAfter`（默认 60s）作为响应头发给客户端，缓存 TTL 必须与之一致。
+  // 否则 Medium / iTunes 这类源的持续限流会被按 cache.negative_ttl（默认 6h）缓存，
+  // 一次 429 就把该 feed 毒 6 小时，而客户端只被告知 60s 后可重试——两者自相矛盾。
+  // 取 min 是为了不让上游给的 retryAfter 突破运维设定的上限。
+  const configured = await getIntSetting(env, 'cache.negative_ttl')
+  const fallback = configured > 0 ? configured : 21_600
+  const seconds = error.retryAfter !== undefined && error.retryAfter > 0
+    ? Math.min(error.retryAfter, fallback)
+    : fallback
   const now = Date.now()
   const body = encodeText(JSON.stringify(error.toBody()))
   return store(env, {

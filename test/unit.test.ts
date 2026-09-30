@@ -44,6 +44,8 @@ const ALLOWLIST = [
   'api.zenrows.com',
   'r.jina.ai',
   'lobste.rs',
+  'a.4cdn.org',
+  't.me',
   'itunes.apple.com',
   'api.crossref.org',
   'pypi.org',
@@ -56,6 +58,7 @@ const ALLOWLIST = [
   'api.open-meteo.com',
   'geocoding-api.open-meteo.com',
   'air-quality-api.open-meteo.com',
+  'medium.com',
 ]
 
 describe('错误体与状态码映射', () => {
@@ -1509,3 +1512,474 @@ describe('上游出口', () => {
     await expect(assertAllowedUpstream(env, 'https://169.254.169.254/x')).rejects.toThrow(/blocked/)
   })
 })
+
+describe('4chan（只读 catalog，零 key）', () => {
+  it('catalog 拼出 a.4cdn.org/{board}/catalog.json', async () => {
+    const rt = runtimeFor('fourchan')!
+    expect(await rt.buildPlan(env, { op: 'catalog', id: 'g', query: [] })).toEqual({
+      url: 'https://a.4cdn.org/g/catalog.json',
+      resource: 'feed',
+      timeoutMs: 5000,
+    })
+  })
+
+  it('board 非法值返 400：路径穿越/斜杠/大写/超长/空', async () => {
+    const rt = runtimeFor('fourchan')!
+    // 4chan 板块名允许纯数字（/3/、/4chan/），但必须小写、不含 / 和 .
+    for (const bad of ['../admin', 'g/catalog.json', 'G', 'waytoolong', '', 'g.', 'a b']) {
+      await expect(rt.buildPlan(env, { op: 'catalog', id: bad, query: [] })).rejects.toThrow(
+        /invalid board/,
+      )
+    }
+  })
+
+  it('transform 跨页展平并按 limit 截断，保留上游 bump 序', () => {
+    const rt = runtimeFor('fourchan')!
+    // 上游是 [{page, threads:[...]}]，且顺序是 bump 序而非 replies 降序
+    const pages = [
+      { page: 1, threads: [{ no: 3, replies: 3 }, { no: 74, replies: 74 }] },
+      { page: 2, threads: [{ no: 9, replies: 9 }, { no: 6, replies: 6 }] },
+    ]
+    const out = JSON.parse(
+      rt.transform!(JSON.stringify(pages), { op: 'catalog', id: 'g', query: [['limit', '3']] }).text,
+    )
+    expect(out.provider).toBe('fourchan')
+    // 3/74/9 跨页取，顺序照抄上游（不按 replies 重排）
+    expect(out.threads.map((t: { no: number }) => t.no)).toEqual([3, 74, 9])
+  })
+
+  it('transform 缺 limit 时默认 25 条，与 ParamDef 声明一致（HTTP 会注入 default=25）', () => {
+    const rt = runtimeFor('fourchan')!
+    const threads = Array.from({ length: 150 }, (_, i) => ({ no: i + 1 }))
+    const out = JSON.parse(
+      rt.transform!(JSON.stringify([{ page: 1, threads }]), { op: 'catalog', id: 'g', query: [] }).text,
+    )
+    expect(out.threads).toHaveLength(25)
+  })
+
+  it('transform 对坏/空结构一律抛错，不返回空数组（否则会被负缓存 6 小时）', () => {
+    const rt = runtimeFor('fourchan')!
+    // 非 JSON / 非数组 / 页无 threads / 线程 malformed / 空 catalog 数组 / 全空板
+    for (const bad of [
+      'not json',
+      '{}',
+      '[{"page":1}]',
+      '[{"page":1,"threads":[{}]}]',
+      '[]',
+      '[{"page":1,"threads":[]}]',
+    ]) {
+      expect(() => rt.transform!(bad, { op: 'catalog', id: 'g', query: [] })).toThrow()
+    }
+  })
+
+  it('quota 与 host 都进了默认值', async () => {
+    expect((await readCredits(env, 'fourchan', 'default')).limit).toBe(10000)
+    expect(ALLOWLIST).toContain('a.4cdn.org')
+  })
+})
+
+describe('Telegram（t.me/s/ 公开预览，零凭据）', () => {
+  it('channel 拼出 t.me/s/{channel}，不放行 @ 前缀', async () => {
+    const rt = runtimeFor('telegram')!
+    expect(await rt.buildPlan(env, { op: 'channel', id: 'telegram', query: [] })).toEqual({
+      url: 'https://t.me/s/telegram',
+      resource: 'feed',
+      timeoutMs: 5000,
+      retries: 0,
+    })
+    for (const bad of ['@telegram', '1abc', 'a-b', '../x', '', 'a', 'x'.repeat(40)]) {
+      await expect(rt.buildPlan(env, { op: 'channel', id: bad, query: [] })).rejects.toThrow(
+        /invalid channel/,
+      )
+    }
+  })
+
+  it('limit 超单页上限时按 20 截断（UpstreamPlan 只支持单个 url）', () => {
+    const rt = runtimeFor('telegram')!
+    const out = JSON.parse(
+      rt.transform!(tgChannel(40), { op: 'channel', id: 'telegram', query: [['limit', '999']] }).text,
+    )
+    expect(out.posts).toHaveLength(20)
+  })
+
+  it('无频道元数据 → 404：私域频道返 200 空页，不能当空结果缓存', () => {
+    const rt = runtimeFor('telegram')!
+    // 坑 1：Telegram 对无公开预览的频道回 200 且零 post 节点
+    expect(() => rt.transform!(tgChannel(0, false), { op: 'channel', id: 'priv', query: [] })).toThrow(
+      /no public preview/,
+    )
+  })
+
+  it('tme_no_messages_found → 502：请求过密，不是空频道', () => {
+    const rt = runtimeFor('telegram')!
+    // 坑 2：返回空数组会被负缓存 6 小时，所以必须抛错让上层重试
+    const html = tgHeader() + '<div class="tme_no_messages_found">nothing</div>'
+    expect(() => rt.transform!(html, { op: 'channel', id: 'telegram', query: [] })).toThrow(
+      /no messages found/,
+    )
+  })
+
+  it('service_message 不计入 posts（"频道已创建"之类系统通知）', () => {
+    const rt = runtimeFor('telegram')!
+    const html = tgHeader() + tgPost('telegram', 5, 'real') + tgServicePost(6)
+    const out = JSON.parse(rt.transform!(html, { op: 'channel', id: 'telegram', query: [] }).text)
+    // 坑 3
+    expect(out.posts).toHaveLength(1)
+    expect(out.posts[0]!.id).toBe(5)
+  })
+
+  it('倒序页面输出最新在前', () => {
+    const rt = runtimeFor('telegram')!
+    // 坑 4：t.me/s/ DOM 旧帖在上、最新在末尾（已对真实页面验证），reverse 后最新在前
+    const html = tgHeader() + tgPost('c', 99, 'older') + tgPost('c', 100, 'newest')
+    const out = JSON.parse(rt.transform!(html, { op: 'channel', id: 'c', query: [] }).text)
+    expect(out.posts.map((p: { id: number }) => p.id)).toEqual([100, 99])
+  })
+
+  it('views 解析 K/M/B，坏值不落 0', () => {
+    const rt = runtimeFor('telegram')!
+    const html =
+      tgHeader() + tgPost('c', 1, 'a', '1.36M') + tgPost('c', 2, 'b', 'n/a') + tgPost('c', 3, 'c', '934')
+    const out = JSON.parse(rt.transform!(html, { op: 'channel', id: 'c', query: [] }).text)
+    expect(out.posts.find((p: { id: number }) => p.id === 1)!.views).toBe(1360000)
+    expect(out.posts.find((p: { id: number }) => p.id === 2)!.views).toBeUndefined()
+    expect(out.posts.find((p: { id: number }) => p.id === 3)!.views).toBe(934)
+  })
+
+  it('提取频道元信息并剥掉 @ 前缀', () => {
+    const rt = runtimeFor('telegram')!
+    const out = JSON.parse(
+      rt.transform!(tgHeader() + tgPost('telegram', 1, 'x'), { op: 'channel', id: 'telegram', query: [] })
+        .text,
+    )
+    expect(out.provider).toBe('telegram')
+    expect(out.channel).toBe('telegram')
+    expect(out.title).toBe('Telegram')
+    expect(out.subscribers).toBe(1200000)
+  })
+
+  it('username 被 <a> 包裹时仍能剥出 channel（真实 t.me/mark）', () => {
+    const rt = runtimeFor('telegram')!
+    const html =
+      '<div class="tgme_channel_info">' +
+      '<div class="tgme_channel_info_header_title"><span>Pavel Durov</span></div>' +
+      '<div class="tgme_channel_info_header_username"><a href="https://t.me/durov">@durov</a></div>' +
+      '</div>' +
+      tgPost('durov', 1, 'x')
+    const out = JSON.parse(rt.transform!(html, { op: 'channel', id: 'durov', query: [] }).text)
+    expect(out.channel).toBe('durov')
+    expect(out.title).toBe('Pavel Durov')
+  })
+
+  it('quota 与 host 都进了默认值', async () => {
+    expect((await readCredits(env, 'telegram', 'default')).limit).toBe(5000)
+    expect(ALLOWLIST).toContain('t.me')
+  })
+})
+
+describe('Medium（官方公开 RSS，零凭据）', () => {
+  it('四种官方 feed URL 各自拼对（scheme 见官方 Help Center 214874118）', async () => {
+    const rt = runtimeFor('medium')!
+    const cases: [string, string, string][] = [
+      ['tag', 'programming', 'https://medium.com/feed/tag/programming'],
+      ['publication', 'towards-data-science', 'https://medium.com/feed/towards-data-science'],
+      ['user', 'dhh', 'https://medium.com/feed/@dhh'],
+      // 多路径参数由 v1.ts 按声明顺序用 / 拼进 target.id
+      ['tagged', 'better-programming/python', 'https://medium.com/feed/better-programming/tagged/python'],
+    ]
+    for (const [op, id, url] of cases) {
+      expect(await rt.buildPlan(env, { op, id, query: [] })).toEqual({
+        url,
+        resource: 'feed',
+        timeoutMs: 5000,
+        // Medium 限流是持续封锁，fetcher 的 200/600/1500ms 退避救不回来
+        retries: 0,
+      })
+    }
+  })
+
+  it('路径段一律走字符白名单，拒掉 / & % 与路径穿越', async () => {
+    const rt = runtimeFor('medium')!
+    for (const bad of ['', 'a/b', 'a&b', 'a%2e', '..', 'A', '-x', 'x'.repeat(51)]) {
+      await expect(rt.buildPlan(env, { op: 'tag', id: bad, query: [] })).rejects.toThrow(/invalid tag/)
+    }
+    for (const bad of ['', '@dhh', '..', 'a/../b', 'a b', 'x'.repeat(51)]) {
+      await expect(rt.buildPlan(env, { op: 'user', id: bad, query: [] })).rejects.toThrow(/invalid user/)
+    }
+  })
+
+  it('tagged 必须是恰好两段；未知 op 是 404', async () => {
+    const rt = runtimeFor('medium')!
+    await expect(rt.buildPlan(env, { op: 'tagged', id: 'onlyone', query: [] })).rejects.toThrow(
+      /invalid publication\/tag/,
+    )
+    await expect(
+      rt.buildPlan(env, { op: 'tagged', id: 'a/b/c', query: [] }),
+    ).rejects.toThrow(/invalid publication\/tag/)
+    await expect(rt.buildPlan(env, { op: 'nope', id: 'x', query: [] })).rejects.toMatchObject({
+      status: 404,
+    })
+  })
+
+  it('剥 CDATA、吃掉 <guid> 属性、剥掉 link 上的 source 追踪后缀', () => {
+    const rt = runtimeFor('medium')!
+    const out = JSON.parse(
+      rt.transform!(mdFeed([mdItem({ title: 'Profiling Python', author: 'Yang Zhou' })]), {
+        op: 'tag',
+        id: 'programming',
+        query: [],
+      }).text,
+    )
+    expect(out.provider).toBe('medium')
+    expect(out.title).toBe('Programming on Medium')
+    expect(out.updated).toBe('Fri, 02 Jun 2026 16:53:18 GMT')
+    // 频道 link 的 ?source=rss------programming-5 必须去掉
+    expect(out.url).toBe('https://medium.com/tag/programming/latest')
+    const post = out.posts[0]
+    expect(post.title).toBe('Profiling Python')
+    expect(post.author).toBe('Yang Zhou')
+    // arXiv 的 tagText 写死 <${tag}>，吃不到 isPermaLink 属性
+    expect(post.id).toBe('https://medium.com/p/36024bdb36c6')
+    expect(post.url).toBe('https://medium.com/p/36024bdb36c6')
+    // RFC-822 原样透传，不擅自转 ISO
+    expect(post.published).toBe('Tue, 02 Jun 2026 16:38:28 GMT')
+    expect(post.updated).toBe('2026-06-02T16:38:28.436Z')
+    expect(post.tags).toEqual(['programming', 'python'])
+  })
+
+  it('零宽字符要清掉：Medium 会在正文里插 U+2060/U+200C 干扰比对', () => {
+    const rt = runtimeFor('medium')!
+    // 码点一律用 String.fromCodePoint 拼，源码里不放字面不可见字符：
+    // 字面量经编辑/传输极易丢字或乱码，测试会静默退化成"什么都没测"；
+    // 而且字面字符类里 U+200B 紧跟 "-" 会被解析成 0x2D-0x200C 的范围。
+    const zw = (code: number): string => String.fromCodePoint(code)
+    const dirty = `We bui${zw(0x200c)}l${zw(0x200d)}d the sys${zw(0x2060)}tem`
+    const out = JSON.parse(
+      rt.transform!(mdFeed([mdItem({ title: dirty, content: `<p>${dirty}</p>` })]), {
+        op: 'tag',
+        id: 'programming',
+        query: [],
+      }).text,
+    )
+    expect(out.posts[0].title).toBe('We build the system')
+    expect(out.posts[0].excerpt).toBe('We build the system')
+    // 兜底：任一零宽/软连字符残留都要被抓出来（比正则直观，也无范围歧义）
+    const residual = [0x200b, 0x200c, 0x200d, 0x2060, 0xfeff, 0x00ad].filter((code) =>
+      (out.posts[0].excerpt as string).includes(zw(code)),
+    )
+    expect(residual).toEqual([])
+  })
+
+  it('但 emoji 家庭序列与天城文连字里的 ZWJ 必须留着', () => {
+    const rt = runtimeFor('medium')!
+    // 无脑全删会毁掉这两个：ZWJ 是 emoji 序列的载体，在天城文里是连字的一部分
+    const fromCps = (cps: number[]): string => cps.map((c) => String.fromCodePoint(c)).join('')
+    const family = fromCps([0x1f468, 0x200d, 0x1f469, 0x200d, 0x1f467, 0x200d, 0x1f466])
+    const devanagari = fromCps([0x915, 0x94d, 0x200d, 0x937])
+    // 先自证 fixture 里真有 ZWJ，否则这两条断言等于什么都没测
+    // 用 Array.from（码点）而非 split('')（码元）：emoji 是代理对，码元数会翻倍
+    expect(Array.from(family)).toHaveLength(7)
+    expect(Array.from(devanagari)).toHaveLength(4)
+    const out = JSON.parse(
+      rt.transform!(mdFeed([mdItem({ content: `<p>${family} ${devanagari}</p>` })]), {
+        op: 'tag',
+        id: 'programming',
+        query: [],
+      }).text,
+    )
+    expect(out.posts[0].excerpt).toBe(`${family} ${devanagari}`)
+  })
+
+  it('先剥标签再解实体：&amp;lt;script&amp;gt; 不能被二次解码成 <script>', () => {
+    const rt = runtimeFor('medium')!
+    const out = JSON.parse(
+      rt.transform!(
+        mdFeed([mdItem({ content: '<p>&amp;lt;script&amp;gt;alert(1)&lt;/script&amp;gt;</p>' })]),
+        { op: 'tag', id: 'programming', query: [] },
+      ).text,
+    )
+    expect(out.posts[0].excerpt).toBe('&lt;script&gt;alert(1)&lt;/script&gt;')
+    expect(out.posts[0].excerpt).not.toContain('<script')
+  })
+
+  it('未知实体原样保留，不吞成空串', () => {
+    const rt = runtimeFor('medium')!
+    const out = JSON.parse(
+      rt.transform!(mdFeed([mdItem({ content: '<p>a &foobar; b</p>' })]), {
+        op: 'tag',
+        id: 'programming',
+        query: [],
+      }).text,
+    )
+    expect(out.posts[0].excerpt).toBe('a &foobar; b')
+  })
+
+  it('孤立代理对与越界码点实体原样保留，fromCodePoint 不抛 RangeError', () => {
+    const rt = runtimeFor('medium')!
+    // &#xD800; 是孤立代理对、&#x110000; 超过 0x10FFFF——这两类会让
+    // String.fromCodePoint 抛 RangeError。inline 路径的 transform 没有 try/catch，
+    // 一旦抛出就漏成 500 且不写负缓存，所以必须保留原文而不是解码。
+    const out = JSON.parse(
+      rt.transform!(
+        mdFeed([mdItem({ content: '<p>bad &#xD800; mid &#x110000; tail</p>' })]),
+        { op: 'tag', id: 'programming', query: [] },
+      ).text,
+    )
+    expect(out.posts[0].excerpt).toBe('bad &#xD800; mid &#x110000; tail')
+  })
+
+  it('摘要优先取 medium-feed-snippet，回退到剥全文；截断到 200 字', () => {
+    const rt = runtimeFor('medium')!
+    const long = 'x'.repeat(500)
+    const out = JSON.parse(
+      rt.transform!(
+        mdFeed([
+          mdItem({ snippet: 'short summary', content: `<p>${long}</p>` }),
+          mdItem({ content: `<p>${long}</p>` }),
+        ]),
+        { op: 'tag', id: 'programming', query: [] },
+      ).text,
+    )
+    // 有 snippet 段就用它，不吃 500 字的正文
+    expect(out.posts[0].excerpt).toBe('short summary')
+    // 没有 snippet 才回退剥正文，并截到 200
+    expect(out.posts[1].excerpt).toHaveLength(200)
+  })
+
+  it('付费文章标 metered，只取预览不做任何绕过', () => {
+    const rt = runtimeFor('medium')!
+    const out = JSON.parse(
+      rt.transform!(mdFeed([mdItem({ content: '<p>preview only</p>', metered: true })]), {
+        op: 'tag',
+        id: 'programming',
+        query: [],
+      }).text,
+    )
+    expect(out.posts[0].metered).toBe(true)
+    expect(out.posts[0].excerpt).toBe('preview only')
+  })
+
+  it('limit 截断；队列路径无校验所以 clamp 是必需防御', () => {
+    const rt = runtimeFor('medium')!
+    const xml = mdFeed([mdItem(), mdItem(), mdItem()])
+    // 队列的 target 来自 decodeTarget，绕过了 v1.ts 的 collectQuery
+    const out = JSON.parse(
+      rt.transform!(xml, { op: 'tag', id: 'programming', query: [['limit', '999']] }).text,
+    )
+    expect(out.posts).toHaveLength(3)
+    const two = JSON.parse(
+      rt.transform!(xml, { op: 'tag', id: 'programming', query: [['limit', '2']] }).text,
+    )
+    expect(two.posts).toHaveLength(2)
+    expect(two.count).toBe(2)
+  })
+
+  it('0 items 抛 502 而不是返回空数组：社区实测限流会 200+空 body', () => {
+    const rt = runtimeFor('medium')!
+    // 空结果被缓存 120s 意味着热贴凭空消失；502 至少能让下次重试
+    expect(() => rt.transform!(mdFeed([]), { op: 'tag', id: 'programming', query: [] })).toThrow(
+      /no items/,
+    )
+  })
+
+  it('不是 RSS 就抛 502 —— "结构不认识"不能猜成 404', () => {
+    const rt = runtimeFor('medium')!
+    // 429 限流页 / Cloudflare 挑战页都是 200 + HTML，若判 404 会被负缓存 6 小时
+    for (const bad of [
+      '<html><body>Just a moment...</body></html>',
+      '<rss version="2.0"></rss>',
+      'Too many feed requests. See: https://medium.superfeedr.com',
+    ]) {
+      expect(() => rt.transform!(bad, { op: 'tag', id: 'programming', query: [] })).toThrow()
+    }
+  })
+
+  it('quota 与 host 都进了默认值', async () => {
+    expect((await readCredits(env, 'medium', 'default')).limit).toBe(5000)
+    expect(ALLOWLIST).toContain('medium.com')
+  })
+})
+
+/** Medium RSS 的 channel 外壳，字段名与实测输出一致 */
+function mdFeed(items: string[], opts: { title?: string; link?: string } = {}): string {
+  return (
+    '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<rss xmlns:dc="http://purl.org/dc/elements/1.1/" ' +
+    'xmlns:content="http://purl.org/rss/1.0/modules/content/" ' +
+    'xmlns:atom="http://www.w3.org/2005/Atom" version="2.0">' +
+    '<channel>' +
+    `<title><![CDATA[${opts.title ?? 'Programming on Medium'}]]></title>` +
+    `<link>${opts.link ?? 'https://medium.com/tag/programming/latest?source=rss------programming-5'}</link>` +
+    '<lastBuildDate>Fri, 02 Jun 2026 16:53:18 GMT</lastBuildDate>' +
+    items.join('') +
+    '</channel></rss>'
+  )
+}
+
+function mdItem(
+  o: {
+    title?: string
+    author?: string
+    snippet?: string
+    content?: string
+    metered?: boolean
+  } = {},
+): string {
+  const content = o.content ?? '<p>body text</p>'
+  return (
+    '<item>' +
+    `<title><![CDATA[${o.title ?? 'A post'}]]></title>` +
+    '<link>https://medium.com/p/36024bdb36c6?source=rss------programming-5</link>' +
+    '<guid isPermaLink="false">https://medium.com/p/36024bdb36c6</guid>' +
+    `<dc:creator><![CDATA[${o.author ?? 'Yang Zhou'}]]></dc:creator>` +
+    '<pubDate>Tue, 02 Jun 2026 16:38:28 GMT</pubDate>' +
+    '<atom:updated>2026-06-02T16:38:28.436Z</atom:updated>' +
+    '<category><![CDATA[programming]]></category>' +
+    '<category><![CDATA[python]]></category>' +
+    '<description><![CDATA[<div class="medium-feed-item">' +
+    '<p class="medium-feed-image"><img src="https://cdn-images-1.medium.com/max/2048/1*Zyv.png" width="2048"></p>' +
+    (o.snippet === undefined ? '' : `<p class="medium-feed-snippet">${o.snippet}</p>`) +
+    (o.metered === true
+      ? '<p class="medium-feed-link"><a href="https://medium.com/p/36024bdb36c6">Continue reading on Level Up Coding »</a></p>'
+      : '') +
+    `</div>]]></description>` +
+    `<content:encoded><![CDATA[${content}]]></content:encoded>` +
+    '</item>'
+  )
+}
+
+/** t.me/s/ 的频道元信息块，缺它即视为无公开预览（坑 1 的判据） */
+function tgHeader(): string {
+  return (
+    '<div class="tgme_channel_info">' +
+    '<div class="tgme_channel_info_header_title"><span>Telegram</span></div>' +
+    '<div class="tgme_channel_info_header_username">@telegram</div>' +
+    '<div class="tgme_channel_info_description">news</div>' +
+    '<div class="tgme_channel_info_counter">' +
+    '<span class="counter_type">subscribers</span><span class="counter_value">1.2M</span></div>' +
+    '</div>'
+  )
+}
+
+function tgPost(channel: string, id: number, text: string, views?: string): string {
+  return (
+    `<div class="tgme_widget_message_wrap"><div class="tgme_widget_message" data-post="${channel}/${id}">` +
+    `<div class="tgme_widget_message_text">${text}</div>` +
+    (views === undefined ? '' : `<span class="tgme_widget_message_views">${views}</span>`) +
+    '<a class="tgme_widget_message_date"><time datetime="2026-09-29T10:00:00+00:00"></time></a>' +
+    '</div></div>'
+  )
+}
+
+function tgServicePost(id: number): string {
+  return (
+    '<div class="tgme_widget_message_wrap service_message">' +
+    `<div class="tgme_widget_message" data-post="c/${id}"><div>Channel created</div></div></div>`
+  )
+}
+
+function tgChannel(count: number, withHeader = true): string {
+  let out = withHeader ? tgHeader() : ''
+  for (let i = 1; i <= count; i++) out += tgPost('c', i, `m${i}`)
+  return out
+}

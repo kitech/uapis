@@ -18,7 +18,7 @@ export const SETTINGS_DEFAULTS: Readonly<Record<string, string>> = Object.freeze
   'gate.min_ms': '',
   'cors.origins': '*',
   'upstream.allowlist':
-    'api.stackexchange.com,hn.algolia.com,api.github.com,dev.to,export.arxiv.org,api.zenrows.com,r.jina.ai,lobste.rs,itunes.apple.com,api.crossref.org,pypi.org,registry.npmjs.org,eutils.ncbi.nlm.nih.gov,earthquake.usgs.gov,gitlab.com,crates.io,musicbrainz.org,api.open-meteo.com,geocoding-api.open-meteo.com,air-quality-api.open-meteo.com',
+    'api.stackexchange.com,hn.algolia.com,api.github.com,dev.to,export.arxiv.org,api.zenrows.com,r.jina.ai,lobste.rs,a.4cdn.org,t.me,itunes.apple.com,api.crossref.org,pypi.org,registry.npmjs.org,eutils.ncbi.nlm.nih.gov,earthquake.usgs.gov,gitlab.com,crates.io,musicbrainz.org,api.open-meteo.com,geocoding-api.open-meteo.com,air-quality-api.open-meteo.com,medium.com',
   'queue.daily_limit': '3000',
   'queue.soft_limit': '2700',
   'warm.list': '',
@@ -36,6 +36,9 @@ export const SETTINGS_DEFAULTS: Readonly<Record<string, string>> = Object.freeze
   'quota.devto.default': '9000',
   'quota.arxiv.default': '4000',
   'quota.lobsters.default': '6000',
+  'quota.fourchan.default': '10000',
+  'quota.telegram.default': '5000',
+  'quota.medium.default': '5000',
   'quota.itunes.default': '9000',
   'quota.crossref.default': '5000',
   'quota.pypi.default': '6000',
