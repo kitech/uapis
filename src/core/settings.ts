@@ -18,7 +18,7 @@ export const SETTINGS_DEFAULTS: Readonly<Record<string, string>> = Object.freeze
   'gate.min_ms': '',
   'cors.origins': '*',
   'upstream.allowlist':
-    'api.stackexchange.com,hn.algolia.com,api.github.com,dev.to,export.arxiv.org,api.zenrows.com,r.jina.ai,lobste.rs,a.4cdn.org,t.me,itunes.apple.com,api.crossref.org,pypi.org,registry.npmjs.org,eutils.ncbi.nlm.nih.gov,earthquake.usgs.gov,gitlab.com,crates.io,musicbrainz.org,api.open-meteo.com,geocoding-api.open-meteo.com,air-quality-api.open-meteo.com,medium.com',
+    'api.stackexchange.com,hn.algolia.com,api.github.com,dev.to,export.arxiv.org,api.zenrows.com,r.jina.ai,lobste.rs,a.4cdn.org,t.me,itunes.apple.com,api.crossref.org,pypi.org,registry.npmjs.org,eutils.ncbi.nlm.nih.gov,earthquake.usgs.gov,gitlab.com,crates.io,musicbrainz.org,api.open-meteo.com,geocoding-api.open-meteo.com,air-quality-api.open-meteo.com,medium.com,api.biorxiv.org,api.hal.science,meta.discourse.org,discuss.python.org,discourse.nixos.org,forums.swift.org,community.crowdin.com,framatube.org,peertube.tv,video.blender.org,peertube.opencloud.lu,tube.tchncs.de,tilvids.com',
   'queue.daily_limit': '3000',
   'queue.soft_limit': '2700',
   'warm.list': '',
@@ -48,6 +48,10 @@ export const SETTINGS_DEFAULTS: Readonly<Record<string, string>> = Object.freeze
   'quota.gitlab.default': '5000',
   'quota.crates.default': '3000',
   'quota.musicbrainz.default': '4000',
+  'quota.biorxiv.default': '4000',
+  'quota.hal.default': '5000',
+  'quota.discourse.default': '6000',
+  'quota.peertube.default': '5000',
   'quota.openmeteo.default': '4000',
 })
 

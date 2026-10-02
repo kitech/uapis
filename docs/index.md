@@ -54,11 +54,15 @@ hero:
 | medium | `tag/{tag}`、`publication/{publication}`、`user/{user}`、`tagged/{publication}/{tag}` | 无 |
 | telegram | `channel/{channel}` | 无 |
 | fourchan | `catalog/{board}` | 无（⚠️ 4chan 风控拒绝 Workers 出口，当前 403） |
+| biorxiv | `{server}/recent`、`{server}/range`、`{server}/detail/{doi}` | 无 |
+| hal | `search`、`detail/{id}` | 无 |
+| discourse | `{forum}/hot`、`{forum}/top`、`{forum}/latest` | 无 |
+| peertube | `{instance}/trending`、`{instance}/views`、`{instance}/likes`、`{instance}/latest` | 无 |
 
-20 个数据源 / 60 个端点里，**只有 Stack Exchange 的 6 个端点必须配 key**（`/sites` 除外），
+24 个数据源 / 72 个端点里，**只有 Stack Exchange 的 6 个端点必须配 key**（`/sites` 除外），
 其余全是零 key 源。完整参数见 [数据源与凭据](/guide/providers) 或 `/openapi.json`。
 
-其中 16 个 feed 端点额外支持 `format` 参数，可在 `uapis`（默认）、`original`、
+其中 26 个 feed 端点额外支持 `format` 参数，可在 `uapis`（默认）、`original`、
 `rss`、`atom` 四种形态间选择，见[输出格式](/guide/providers#输出格式)。
 
 ## 快速预览

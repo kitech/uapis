@@ -7,7 +7,7 @@
 ### Added
 
 - **feed 端点的 `format` 参数**（`src/core/uapis.ts` + `src/core/feedxml.ts`）：
-  16 个 feed 端点（9 个 provider）可显式选择响应形态，取值
+  26 个 feed 端点（13 个 provider）可显式选择响应形态，取值
   `original`（上游原样）/ `uapis`（默认，归一化业务 JSON）/ `rss`（RSS 2.0）/
   `atom`（Atom 1.0）。此前只有透传与归一化两种，订阅器要 RSS/Atom 只能自己在
   客户端转

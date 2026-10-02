@@ -35,6 +35,10 @@ const MB = 'https://musicbrainz.org'
 const OM = 'https://api.open-meteo.com'
 const OM_GEO = 'https://geocoding-api.open-meteo.com'
 const OM_AQ = 'https://air-quality-api.open-meteo.com'
+const BIORXIV = 'https://api.biorxiv.org'
+const HAL = 'https://api.hal.science'
+const DISCOURSE = 'https://meta.discourse.org'
+const PEERTUBE = 'https://framatube.org'
 
 const ECONOMIST_HTML = `<html><head><title>Fallback</title>
   <meta property="og:title" content="Paywalled &amp; locked">
@@ -86,6 +90,10 @@ let mb: { urls: string[] }
 let om: { urls: string[] }
 let omGeo: { urls: string[] }
 let omAq: { urls: string[] }
+let biorxiv: { urls: string[] }
+let hal: { urls: string[] }
+let discourse: { urls: string[] }
+let peertube: { urls: string[] }
 
 /** 每次测试都从这组默认 handler 开始，用例内的 network.use 不会污染后续用例 */
 function defaultHandlers(): ReturnType<typeof http.get>[] {
@@ -356,6 +364,97 @@ function defaultHandlers(): ReturnType<typeof http.get>[] {
       const doi = new URL(request.url).pathname.replace('/works/', '')
       return HttpResponse.json({ status: 'ok', message: { DOI: doi, title: ['A study'] } })
     }),
+    // bioRxiv：details 的日期区间与详情 DOI 是同一个 pathname 家族，
+    // 用正则区分 `/0/json`（区间）与 `/na/json`（详情）
+    http.get(/api\.biorxiv\.org\/details\/[^/]+\/[^/]+\/0\/json$/, ({ request }) => {
+      biorxiv.urls.push(request.url)
+      return HttpResponse.json({
+        messages: [],
+        collection: [
+          {
+            doi: '10.1101/2026.09.20.123456',
+            title: 'A & B study',
+            authors: 'Doe J, Roe R',
+            date: '2026-09-20',
+            version: '1',
+            type: 'new results',
+            category: 'genomics',
+            abstract: 'abs',
+            server: 'biorxiv',
+          },
+        ],
+      })
+    }),
+    http.get(/api\.biorxiv\.org\/details\/[^/]+\/[^/]+\/na\/json$/, ({ request }) => {
+      biorxiv.urls.push(request.url)
+      return HttpResponse.json({
+        messages: [],
+        collection: [{ doi: '10.1101/2026.09.20.123456', title: 'A & B study', authors: 'Doe J', date: '2026-09-20', version: '1' }],
+      })
+    }),
+    // HAL：检索与详情共用 `/search/`，靠 query 区分
+    http.get(`${HAL}/search/`, ({ request }) => {
+      hal.urls.push(request.url)
+      return HttpResponse.json({
+        response: {
+          numFound: 1,
+          docs: [
+            {
+              halId_s: 'hal-05597672',
+              title_s: ['Quantum & y'],
+              authFullName_s: ['Doe Jane'],
+              producedDate_s: '2026-01-02',
+              abstract_s: ['abs'],
+              uri_s: 'https://hal.science/hal-05597672',
+            },
+          ],
+        },
+      })
+    }),
+    // Discourse：hot / top / latest 是三个 pathname
+    http.get(`${DISCOURSE}/hot.json`, ({ request }) => {
+      discourse.urls.push(request.url)
+      return HttpResponse.json({
+        topic_list: {
+          topics: [
+            {
+              id: 11,
+              title: 'A & B',
+              slug: 'a-b',
+              posts_count: 7,
+              like_count: 5,
+              views: 321,
+              created_at: '2026-04-01T00:00:00.000Z',
+              last_posted_at: '2026-04-02T00:00:00.000Z',
+              users: [{ username: 'jane' }],
+            },
+          ],
+        },
+      })
+    }),
+    http.get(`${DISCOURSE}/top.json`, ({ request }) => {
+      discourse.urls.push(request.url)
+      return HttpResponse.json({ topic_list: { topics: [] } })
+    }),
+    // PeerTube：只有 `/api/v1/videos` 一个 pathname，sort 靠 query 区分
+    http.get(`${PEERTUBE}/api/v1/videos`, ({ request }) => {
+      peertube.urls.push(request.url)
+      return HttpResponse.json({
+        total: 1,
+        data: [
+          {
+            uuid: 'u1',
+            name: 'A & B',
+            publishedAt: '2026-04-01T10:00:00.000Z',
+            duration: 3661,
+            views: 100,
+            likes: 5,
+            isLive: false,
+            url: 'https://framatube.org/w/u1',
+          },
+        ],
+      })
+    }),
   ]
 }
 
@@ -382,6 +481,10 @@ beforeAll(async () => {
   om = { urls: [] }
   omGeo = { urls: [] }
   omAq = { urls: [] }
+  biorxiv = { urls: [] }
+  hal = { urls: [] }
+  discourse = { urls: [] }
+  peertube = { urls: [] }
   // 测试里不真实限速：把 provider 闸门间隔压到 0
   await putSettings(env, { 'gate.min_ms': '0' })
   clearSettingsMemo()
@@ -412,6 +515,10 @@ afterEach(() => {
   gitlab.urls = []
   crates.urls = []
   mb.urls = []
+  biorxiv.urls = []
+  hal.urls = []
+  discourse.urls = []
+  peertube.urls = []
 })
 
 // 限流是 isolate 内的固定窗口计数器，不清的话用例数一多就会互相踩出 429
@@ -1778,6 +1885,146 @@ describe('P5 包管理与文献检索源', () => {
     expect(text).toContain('/api/v1/pypi/project/')
     expect(text).toContain('/api/v1/npm/search')
     expect(text).toContain('/api/v1/pubmed/search')
+  })
+})
+
+describe('P6 文献与论坛视频源（biorxiv/hal/discourse/peertube）', () => {
+  it('biorxiv recent：days 是 query，上游收到的是算好的日期区间', async () => {
+    const res = await call('/api/v1/biorxiv/biorxiv/recent?days=3')
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toContain('application/json')
+    const body = (await res.json()) as { type: string; list: Array<Record<string, unknown>> }
+    expect(body.type).toBe('biorxiv:biorxiv:recent')
+    expect(body.list[0]?.url).toBe('https://www.biorxiv.org/content/10.1101/2026.09.20.123456v1')
+    const upstream = new URL(biorxiv.urls.at(-1)!)
+    expect(upstream.pathname).toMatch(
+      /^\/details\/biorxiv\/\d{4}-\d{2}-\d{2}\/\d{4}-\d{2}-\d{2}\/0\/json$/,
+    )
+    // 绝不能把 `3` 或 `3d` 直接丢给上游：那会回 200 + messages + 空 collection
+    expect(upstream.pathname).not.toMatch(/\/3d?\/0\/json$/)
+    expect(upstream.pathname.split('/')[3]).not.toBe('3')
+
+    const second = await call('/api/v1/biorxiv/biorxiv/recent?days=3')
+    expect(['HIT', 'HIT-T1']).toContain(second.headers.get('x-cache'))
+  })
+
+  it('biorxiv：range 的 from/to 与非法 server 均在回源前被拦', async () => {
+    const before = biorxiv.urls.length
+    expect((await call('/api/v1/biorxiv/biorxiv/range?from=2026-09-01&to=2026-09-29')).status).toBe(
+      200,
+    )
+    expect(biorxiv.urls.at(-1)).toContain('/details/biorxiv/2026-09-01/2026-09-29/0/json')
+    for (const path of [
+      '/api/v1/biorxiv/biorxiv/range?from=2026-09-29&to=2026-09-01',
+      '/api/v1/biorxiv/biorxiv/range?from=20260901&to=2026-09-29',
+      '/api/v1/biorxiv/arxiv/recent',
+    ]) {
+      const res = await call(path)
+      expect(res.status).toBe(400)
+      expect(((await res.json()) as { code: string }).code).toBe('INVALID_PARAMETER')
+    }
+    // days=31 超出 1-30 上限
+    expect((await call('/api/v1/biorxiv/biorxiv/recent?days=31')).status).toBe(400)
+    expect(biorxiv.urls.length).toBe(before + 1)
+  })
+
+  it('biorxiv detail：含斜杠的 DOI 能命中路由并落成 item', async () => {
+    const res = await call('/api/v1/biorxiv/biorxiv/detail/10.1101/2026.09.20.123456')
+    expect(res.status).toBe(200)
+    expect(biorxiv.urls.at(-1)).toContain('/details/biorxiv/10.1101/2026.09.20.123456/na/json')
+    // 路径穿越照样 400
+    expect((await call('/api/v1/biorxiv/biorxiv/detail/10.1101/../../admin')).status).toBe(400)
+  })
+
+  it('hal search：sort 用空格分隔，rows 超上限直接 400', async () => {
+    const res = await call('/api/v1/hal/search?q=quantum&rows=10&sort=producedDate_s%20desc')
+    expect(res.status).toBe(200)
+    const upstream = new URL(hal.urls.at(-1)!)
+    expect(upstream.searchParams.get('q')).toBe('quantum')
+    expect(upstream.searchParams.get('rows')).toBe('10')
+    expect(upstream.searchParams.get('sort')).toBe('producedDate_s desc')
+    expect(upstream.searchParams.get('fl')).toContain('title_s')
+    const before = hal.urls.length
+    // rows 上限 100（ParamDef 里 enforce），超了 400 且不打上游
+    expect((await call('/api/v1/hal/search?q=quantum&rows=101')).status).toBe(400)
+    expect((await call('/api/v1/hal/search?q=quantum&rows=10&sort=a_s,b_s%20desc')).status).toBe(200)
+    expect(hal.urls.at(-1)).toContain('sort=a_s%2Cb_s')
+    expect(hal.urls.length).toBe(before + 1)
+  })
+
+  it('hal detail：走 q=halId_s 且 rows=1，不打不存在的 /doc/{id}', async () => {
+    const res = await call('/api/v1/hal/detail/hal-05597672')
+    expect(res.status).toBe(200)
+    const upstream = new URL(hal.urls.at(-1)!)
+    expect(upstream.pathname).toBe('/search/')
+    expect(upstream.searchParams.get('q')).toBe('halId_s:hal-05597672')
+    expect(upstream.searchParams.get('rows')).toBe('1')
+    expect((await call('/api/v1/hal/detail/..%2F..%2Fadmin')).status).toBe(400)
+  })
+
+  it('discourse：host 走 path 段，period 白名单，不在白名单的站点 404/400', async () => {
+    const res = await call('/api/v1/discourse/meta.discourse.org/hot')
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { type: string; list: Array<Record<string, unknown>> }
+    expect(body.type).toBe('discourse:meta.discourse.org:hot')
+    expect(body.list[0]?.url).toBe('https://meta.discourse.org/t/a-b/11')
+    expect(discourse.urls.at(-1)).toBe('https://meta.discourse.org/hot.json?per_page=10')
+
+    expect((await call('/api/v1/discourse/meta.discourse.org/top?period=weekly')).status).toBe(200)
+    expect(discourse.urls.at(-1)).toContain('/top.json?period=weekly')
+    const before = discourse.urls.length
+    expect((await call('/api/v1/discourse/meta.discourse.org/top?period=yearly')).status).toBe(400)
+    // 未验证的站点不进白名单：不能被当成任意 host 的跳板
+    expect((await call('/api/v1/discourse/evil.example/hot')).status).toBe(400)
+    expect(discourse.urls.length).toBe(before)
+  })
+
+  it('peertube：热榜是 sort=-trending 的 query，不是 /videos/trending', async () => {
+    const res = await call('/api/v1/peertube/framatube.org/trending?count=20')
+    expect(res.status).toBe(200)
+    const upstream = new URL(peertube.urls.at(-1)!)
+    expect(upstream.pathname).toBe('/api/v1/videos')
+    expect(upstream.searchParams.get('sort')).toBe('-trending')
+    expect(upstream.searchParams.get('count')).toBe('20')
+    expect(upstream.searchParams.get('isLive')).toBe('false')
+    expect((await call('/api/v1/peertube/framatube.org/views')).status).toBe(200)
+    expect(new URL(peertube.urls.at(-1)!).searchParams.get('sort')).toBe('-views')
+    expect((await call('/api/v1/peertube/framatube.org/likes')).status).toBe(200)
+    expect(new URL(peertube.urls.at(-1)!).searchParams.get('sort')).toBe('-likeCount')
+    // count 上限 20，超了 400 且不打上游
+    const before = peertube.urls.length
+    expect((await call('/api/v1/peertube/framatube.org/trending?count=50')).status).toBe(400)
+    expect(peertube.urls.length).toBe(before)
+    expect((await call('/api/v1/peertube/evil.example/trending')).status).toBe(400)
+  })
+
+  it('四个新源的 feed 都支持 format=rss/atom，item 端点拒绝 format', async () => {
+    const rss = await call('/api/v1/peertube/framatube.org/trending?format=rss')
+    expect(rss.status).toBe(200)
+    expect(rss.headers.get('content-type')).toContain('application/rss+xml')
+    expect(await rss.text()).toContain('<rss')
+    const atom = await call('/api/v1/discourse/meta.discourse.org/hot?format=atom')
+    expect(atom.status).toBe(200)
+    expect(atom.headers.get('content-type')).toContain('application/atom+xml')
+    expect(await atom.text()).toContain('<feed')
+    // detail 是 item 资源，不该接受 format
+    expect((await call('/api/v1/hal/detail/hal-05597672?format=rss')).status).toBe(400)
+    expect((await call('/api/v1/biorxiv/biorxiv/detail/10.1101/2026.09.20.123456?format=atom')).status).toBe(
+      400,
+    )
+  })
+
+  it('bioRxiv 上游 200 + messages 报错不会静默落成空榜', async () => {
+    network.use(
+      http.get(/api\.biorxiv\.org\/details\/[^/]+\/[^/]+\/0\/json$/, () =>
+        HttpResponse.json({
+          messages: [{ status: 'Both dates must be in yyyy-mm-dd format' }],
+          collection: [],
+        }),
+      ),
+    )
+    const res = await call('/api/v1/biorxiv/biorxiv/recent')
+    expect(res.status).toBe(502)
   })
 })
 

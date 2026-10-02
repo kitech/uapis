@@ -488,6 +488,95 @@ curl "https://<你的域名>/api/v1/github/android/rising?since=2026-08-28&per_p
   也是多段路径
 - 归属：各文章版权归作者所有，Medium 托管
 
+## bioRxiv / medRxiv · tier A-
+
+上游：`https://api.biorxiv.org`，官方公开 REST API，**零 key**。
+预印本正文与元数据以 CC BY 4.0 授权。
+
+| 方法 | 路径 | 参数 |
+| --- | --- | --- |
+| GET | `/api/v1/biorxiv/{server}/recent` | 路径 `server`：`biorxiv` / `medrxiv`；`days`(1-30, 默认 7) |
+| GET | `/api/v1/biorxiv/{server}/range` | 路径 `server`：同上；`from`、`to`(均必填，`yyyy-mm-dd`) |
+| GET | `/api/v1/biorxiv/{server}/detail/{doi}` | 两个路径参数；`doi` 含 `/`，多段匹配 |
+
+- **`recent` 是本服务自己算日期区间**，不是把 `N` 或 `Nd` 丢给上游。
+  文档里写了「近 N 篇」(`10`) 与「近 N 天」(`7d`)，实测线上部署会当日期区间解析
+- **报错不是 HTTP 错误码**：非法 interval 回 `200` +
+  `{"messages":[{"status":...}],"collection":[]}`。提取器必须先判 `messages`，
+  否则会把「参数被上游拒了」静默落库成「今天没有新预印本」——两者在响应里长得一样
+- `from > to` 在本地就 400，不花一次回源
+- DOI 形如 `10.1101/2020.09.09.20191205`，含 `/` 故走 `multiSegment`；自己拦了路径穿越
+- 上游未公布硬性限流，闸门 1000ms 是自我约束；`details` 单页固定 30 条
+- 实测区间响应 67-83KB，离 512KB 闸门还有余量
+
+## HAL · tier A-
+
+上游：`https://api.hal.science`，官方 Solr 接口，匿名可用，**零 key**。
+
+| 方法 | 路径 | 参数 |
+| --- | --- | --- |
+| GET | `/api/v1/hal/search` | `q`(必填)；`rows`(1-100, 默认 10)；`start`(默认 0)；`sort`；`fl` |
+| GET | `/api/v1/hal/detail/{id}` | 路径 `id`：`^hal-\d{6,9}(v\d+)?$` |
+
+- **`sort` 是空格分隔，不是逗号**：`sort=producedDate_s,desc` 回 44 字节错误体，
+  `sort=producedDate_s%20desc` 才正常。默认 `producedDate_s desc`
+- **没有 `/doc/{id}` 这条 REST 路径**（会 302）。单篇取回就是一次
+  `q=halId_s:<id>&rows=1` 的检索，所以 `detail` 复用 search 的 URL 形态
+- 默认 `fl` 刻意收窄：`fl=*` 会把 `filesMain_s`（全文 PDF 链接）、`abstract_s`、
+  `keyword_s` 全带回来，体积能翻几倍。要全文由调用方显式传 `fl`
+- 实测 `rows` 10 → 5KB、100 → 52KB，故上界定在 100
+- `timeoutMs: 8000` 且 **`retries: 0`**：Solr 慢查询重试只会把内联请求拖成 2× 超时
+- 归属：各条目按 HAL 上标注的许可（多数 CC BY / CC BY-SA）为准，档案库本身不代为授权
+
+## Discourse · tier A-
+
+上游：多个公开论坛站点的官方 Discourse API，**零 key**。
+host 白名单（也是 `forum` 路径参数的取值）：
+
+`meta.discourse.org`、`discuss.python.org`、`discourse.nixos.org`、
+`forums.swift.org`、`community.crowdin.com`
+
+| 方法 | 路径 | 参数 |
+| --- | --- | --- |
+| GET | `/api/v1/discourse/{forum}/hot` | 路径 `forum`：白名单主机名；`per_page`(1-30, 默认 10) |
+| GET | `/api/v1/discourse/{forum}/top` | 同上；`period`：`daily`/`weekly`/`monthly`/`yearly`/`all`(默认 `weekly`) |
+| GET | `/api/v1/discourse/{forum}/latest` | 同上；`order`：`activity`/`created`(默认 `activity`) |
+
+- **`forum` 路径参数取的就是主机名**。没走「forum slug → host 映射表」是因为那张表
+  得放进 `src/core/uapis.ts`（提取器要用 host 拼话题绝对地址），会与 `FORMAT_PARAM`
+  形成循环依赖 / TDZ。直接用主机名当白名单值最省事
+- **路由层对 path 参数只检查非空、不校验 `enum`**，真正的白名单在
+  `buildPlan` 的 `requireForum`。枚举写在 `ParamDef` 里只为 OpenAPI 文档
+- 同一台站 `per_page` 实测 10 → 28KB、30 → 80KB、50 → 103KB，上游默认 50 太大，
+  故上界压到 30
+- 响应里那个 `users` 数组与热榜无关却占掉相当体积，提取器不取
+- 话题对象只给 `slug` 与数字 `id`，绝对地址由 `https://{forum}/t/{slug}/{id}` 拼出
+- **不接分类（categories）端点**：分类 slug 猜错会 301 到别处，需要逐站核对
+- `forums.raspberrypi.com` 实测 403、`www.askubuntu.com` 302，均不入白名单
+
+## PeerTube · tier A-
+
+上游：多个公开 PeerTube 实例的官方 API，**零 key**。
+host 白名单（也是 `instance` 路径参数的取值）：
+
+`framatube.org`、`peertube.tv`、`video.blender.org`、`peertube.opencloud.lu`、
+`tube.tchncs.de`、`tilvids.com`
+
+| 方法 | 路径 | 参数 |
+| --- | --- | --- |
+| GET | `/api/v1/peertube/{instance}/trending` | 路径 `instance`：白名单主机名；`count`(1-20, 默认 10) |
+| GET | `/api/v1/peertube/{instance}/views` | 同上 |
+| GET | `/api/v1/peertube/{instance}/likes` | 同上 |
+| GET | `/api/v1/peertube/{instance}/latest` | 同上 |
+
+- **热榜是 `?sort=-trending`，不是 `/api/v1/videos/trending`**。后两个写法都不存在：
+  会被 `/api/v1/videos/:id` 的 `{id}` 路由吃掉，回 `Should have a valid video id`
+- **PeerTube 没有全局 RSS**，`/api/v1/videos/rss` 同理不存在
+- 各实例字段实测一致（`url`/`name`/`views`/`likes`/`publishedAt`/`duration`），
+  播放页绝对地址由上游直接给，不用拼
+- 实测单条约 4-4.7KB；`count` 10 → 40KB、20 → 87KB，故上界定在 20
+- 实例可能下线或改实例模式，白名单是**逐个探测过**的固定集合，不做通配
+
 ## 配 key
 
 ```bash
@@ -522,8 +611,8 @@ curl -s https://<你的域名>/status | jq '.providers'
 
 ## 输出格式
 
-16 个 feed 端点（9 个 provider）接受 `format` 查询参数，决定响应体的形态。
-其余 44 个端点没有这个参数，带上就是 400 `unknown query parameter: format`——
+26 个 feed 端点（13 个 provider）接受 `format` 查询参数，决定响应体的形态。
+其余 46 个端点没有这个参数，带上就是 400 `unknown query parameter: format`——
 **不做静默忽略**，理由见[设计决策](/reference/design-decisions)。
 
 | 取值 | 含义 | Content-Type |

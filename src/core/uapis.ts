@@ -46,12 +46,8 @@ export interface FeedSlice {
     /** 条目自身的 ISO 8601 时间，给 Atom 必填的 entry/updated 与 RSS pubDate */
     date?: string
     /** 纯文本摘要，给 RSS description / Atom summary；没来源就不给 */
-    summary?: string
-    extra: unknown
-  }>
 }
 
-type Extractor = (legacy: unknown, target: Target) => FeedSlice | undefined
 
 function str(v: unknown): string {
   return typeof v === 'string' ? v : ''
@@ -341,8 +337,160 @@ function usgsSearch(legacy: unknown): FeedSlice | undefined {
   }
 }
 
+/**
+ * bioRxiv/medRxiv：`{messages:[{status}], collection:[...]}`。
+ *
+ * 关键在于**必须先判 messages**：上游把非法 interval 也回成 HTTP 200 +
+ * 空 `collection`，不判就会把「参数被上游拒了」静默落库成「今天没有新预印本」。
+ * 这与「区间内真的没有论文」在响应里长得一模一样，只能靠 messages 区分。
+ */
+function biorxivSlice(legacy: unknown, target: Target): FeedSlice | undefined {
+  const box = legacy as { messages?: Array<{ status?: string }>; collection?: Array<Record<string, unknown>>; [k: string]: unknown }
+  for (const message of box.messages ?? []) {
+    // 有 status 说明上游在报参数/区间问题，不是「没数据」
+    if (typeof message.status === 'string' && message.status.length > 0) return undefined
+  }
+  const collection = box.collection
+  if (!Array.isArray(collection)) return undefined
+  // path 参数只有 server 一个，id 恒为 `biorxiv` / `medrxiv`；
+  // 退一步兼容旧形态（`biorxiv/7`、`biorxiv/2026-09-01/2026-09-29`），取首段即可
+  const server = str(target.id.split('/')[0])
+  const site = server === 'medrxiv' ? 'www.medrxiv.org' : 'www.biorxiv.org'
+  let latest = ''
+  const items = collection.map((paper) => {
+    const date = str(paper.date)
+    if (date > latest) latest = date
+    const doi = str(paper.doi)
+    // 正文页带版本号（v1/v2），与 details 返回的 version 字段对齐。
+    // 实测上游把 version 回成字符串 "1"，但老样本/衍生接口见过数字，两种都收
+    const version = paper.version === undefined ? '' : `v${str(paper.version)}`
+    return {
+      title: plainText(str(paper.title)),
+      url: doi.length > 0 ? `https://${site}/content/${doi}${version}` : '',
+      // 预印本没有点赞这类互动指标，热度恒 0
+      hot_value: '0',
+      date: isoOpt(date),
+      summary: plainText(str(paper.abstract)) || undefined,
+      extra: { ...paper },
+    }
+  })
+  return {
+    type: `biorxiv:${server}:${target.op}`,
+    // date 只到天（yyyy-mm-dd），当 feed 级时间会丢掉"今天"这个信息，
+    // 拿不到就退回整形时点
+    updateTime: latest.length > 0 ? isoOfStr(latest) : new Date().toISOString(),
+    top: without(box, 'collection'),
+    items,
+  }
+}
+
+/** HAL：`{response:{numFound, start, maxScore, docs:[...]}}`，`docs` 的字段由调用方的 `fl` 决定 */
+function halSearch(legacy: unknown): FeedSlice | undefined {
+  const box = legacy as { response?: Record<string, unknown> }
+  const response = box.response
+  if (response === undefined || response === null || typeof response !== 'object') return undefined
+  const docs = response.docs
+  if (!Array.isArray(docs)) return undefined
+  let latest = ''
+  const items = (docs as Array<Record<string, unknown>>).map((doc) => {
+    const produced = str(doc.producedDate_s)
+    if (produced > latest) latest = produced
+    const title = Array.isArray(doc.title_s) ? str(doc.title_s[0]) : str(doc.title_s)
+    const authors = Array.isArray(doc.authFullName_s) ? doc.authFullName_s.map(str).join(', ') : ''
+    return {
+      title: plainText(title),
+      url: str(doc.uri_s),
+      // HAL 的元数据里没有互动量，热度恒 0
+      hot_value: '0',
+      date: isoOpt(produced),
+      summary: authors.length > 0 ? authors : undefined,
+      extra: { ...doc },
+    }
+  })
+  return {
+    type: 'hal:search',
+    updateTime: latest.length > 0 ? isoOfStr(latest) : new Date().toISOString(),
+    top: without(response, 'docs'),
+    items,
+  }
+}
+
+/**
+ * Discourse：`{users:[...], topic_list:{topics:[...]}}`。
+ * 那个 `users` 数组跟热榜没关系，却占掉响应里相当大的体积，所以不取；
+ * 话题对象只给 `slug` 与数字 `id`，绝对地址要拼 `https://<host>/t/<slug>/<id>`，
+ * 而 `host` 就是 `target.id` 本身（forum 路径参数取的就是主机名）。
+ */
+function discourseSlice(legacy: unknown, target: Target): FeedSlice | undefined {
+  const box = legacy as { topic_list?: Record<string, unknown> }
+  const topicList = box.topic_list
+  if (topicList === undefined || topicList === null || typeof topicList !== 'object') return undefined
+  const topics = topicList.topics
+  if (!Array.isArray(topics)) return undefined
+  const host = target.id
+  let latest = ''
+  const items = (topics as Array<Record<string, unknown>>).map((topic) => {
+    const posted = str(topic.last_posted_at) || str(topic.created_at)
+    if (posted > latest) latest = posted
+    const slug = str(topic.slug)
+    const id = typeof topic.id === 'number' ? topic.id : 0
+    return {
+      title: plainText(str(topic.title)),
+      url: slug.length > 0 && id > 0 ? `https://${host}/t/${slug}/${id}` : '',
+      // hot_board 的热度位：论坛话题没有单一"热度"，取浏览量（like_count 留在 extra）
+      hot_value: typeof topic.views === 'number' ? String(topic.views) : '0',
+      date: isoOpt(posted),
+      extra: { ...topic },
+    }
+  })
+  return {
+    type: `discourse:${host}:${target.op}`,
+    updateTime: latest.length > 0 ? isoOfStr(latest) : new Date().toISOString(),
+    top: without(topicList, 'topics'),
+    items,
+  }
+}
+
+/** PeerTube：`{total, data:[...]}`，列表项自带播放页绝对地址，不用拼 */
+function peertubeSlice(legacy: unknown, target: Target): FeedSlice | undefined {
+  const box = legacy as { total?: number; data?: Array<Record<string, unknown>>; [k: string]: unknown }
+  const data = box.data
+  if (!Array.isArray(data)) return undefined
+  let latestMs = 0
+  const items = data.map((video) => {
+    const published = str(video.publishedAt)
+    const parsed = Date.parse(published)
+    if (Number.isFinite(parsed) && parsed > latestMs) latestMs = parsed
+    return {
+      title: plainText(str(video.name)),
+      url: str(video.url),
+      hot_value: typeof video.views === 'number' ? String(video.views) : '0',
+      date: isoOpt(published),
+      // description 是纯文本（Markdown），仍可能带换行与链接标记，过一遍清洗
+      summary: plainText(str(video.description)) || undefined,
+      extra: { ...video },
+    }
+  })
+  return {
+    type: `peertube:${target.id}:${target.op}`,
+    updateTime: isoOf(latestMs),
+    top: without(box, 'data'),
+    items,
+  }
+}
+
 const EXTRACTORS: Record<string, Extractor> = {
   'fourchan:catalog': fourchanCatalog,
+  'biorxiv:recent': biorxivSlice,
+  'biorxiv:range': biorxivSlice,
+  'hal:search': halSearch,
+  'discourse:hot': discourseSlice,
+  'discourse:top': discourseSlice,
+  'discourse:latest': discourseSlice,
+  'peertube:trending': peertubeSlice,
+  'peertube:views': peertubeSlice,
+  'peertube:likes': peertubeSlice,
+  'peertube:latest': peertubeSlice,
   'telegram:channel': telegramChannel,
   'hackernews:front': hnSlice('front'),
   'hackernews:latest': hnSlice('latest'),

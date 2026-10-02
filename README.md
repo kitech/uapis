@@ -19,12 +19,13 @@
   [docs/reference/design-decisions.md](docs/reference/design-decisions.md)
 - 固定上游 host 白名单 + 不可覆盖的诚实 UA，**不是**开放代理
 - 付费墙源（tier C）只走 ZenRows / Jina 付费通道，不提供免费绕过路径，也不内联回源
-- 已接入 60 个端点 / 20 个数据源：Stack Exchange 7、Hacker News 6、GitHub 4、GitLab 3、
+- 已接入 72 个端点 / 24 个数据源：Stack Exchange 7、Hacker News 6、GitHub 4、GitLab 3、
   DEV.to 3、Medium 4、Lobsters 4、iTunes Search 2、Crossref 2、PyPI 2、
   PubMed 2、arXiv 2、USGS 地震目录 2、crates.io 3、MusicBrainz 4、npm registry 3、
   Open-Meteo 4（⚠️ 条款限非商业用途）、Telegram 1、4chan 1（⚠️ 4chan 风控拒绝
-  Workers 出口，当前不可用）、The Economist 1（tier C，付费通道）
-- 16 个 feed 端点支持 `format` 参数，可在 `uapis`（默认）、`original`、`rss`、`atom`
+  Workers 出口，当前不可用）、The Economist 1（tier C，付费通道）、
+  bioRxiv/medRxiv 3、HAL 2、Discourse 3、PeerTube 4（各带多实例/多站点白名单）
+- 26 个 feed 端点支持 `format` 参数，可在 `uapis`（默认）、`original`、`rss`、`atom`
   四种响应形态间选择，详见[输出格式](docs/guide/providers.md#输出格式)
 
 ## 本地开发
@@ -41,7 +42,7 @@ npm run dev                         # wrangler dev
 
 ```bash
 npm run typecheck
-npm test                            # vitest-pool-workers + MSW 出站拦截，全离线（359 个用例）
+npm test                            # vitest-pool-workers + MSW 出站拦截，全离线（383 个用例）
 npm run deploy:dry                  # 构建文档并 dry-run，产物需 < 64MiB
 ```
 

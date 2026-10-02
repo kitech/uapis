@@ -2082,7 +2082,7 @@ describe('format=uapis（兼容 uapis.cn misc/hotboard 结构）', () => {
 
   it('参数声明：16 个 feed 端点都带 format，默认 uapis、取值 original|uapis|rss|atom', () => {
     const feeds = allEndpoints().filter((e) => e.endpoint.resource === 'feed')
-    expect(feeds.length).toBe(16)
+    expect(feeds.length).toBe(26)
     for (const { provider, endpoint } of feeds) {
       const param = endpoint.params.find((p) => p.name === 'format')
       expect(param, `${provider.name}:${endpoint.op}`).toBeDefined()
@@ -2617,5 +2617,428 @@ describe('format=rss|atom（RSS 2.0 / Atom 1.0）', () => {
     expectWellFormed(rss.text)
     expect(rss.text).toContain('<guid isPermaLink="true">https://l.example/dup</guid>')
     expect(rss.text).toContain('<guid isPermaLink="false">urn:uapis:lobsters:hot:item:2</guid>')
+  })
+})
+
+describe('P6 文献与论坛视频源（biorxiv/hal/discourse/peertube）', () => {
+  /** 与 format 块里的 reshapeOut 同链路：provider transform → reshapeFeed */
+  function reshapeOut(
+    providerName: string,
+    op: string,
+    id: string,
+    query: Array<[string, string]>,
+    legacy: string,
+  ): TransformResult | undefined {
+    const rt = runtimeFor(providerName)!
+    let text = legacy
+    if (rt.transform !== undefined) {
+      text = rt.transform(legacy, { op, id, query }).text
+    }
+    const found = allEndpoints().find(
+      (e) => e.provider.name === providerName && e.endpoint.op === op,
+    )!
+    return reshapeFeed(found.provider, found.endpoint, { op, id, query }, text)
+  }
+
+  function reshape(
+    providerName: string,
+    op: string,
+    id: string,
+    query: Array<[string, string]>,
+    legacy: string,
+  ): Record<string, unknown> {
+    return JSON.parse(reshapeOut(providerName, op, id, query, legacy)!.text)
+  }
+
+  it('biorxiv：recent 自算日期区间而不是把 N/Nd 丢给上游', async () => {
+    const rt = runtimeFor('biorxiv')!
+    const plan = await rt.buildPlan(env, { op: 'recent', id: 'biorxiv', query: [['days', '3']] })
+    expect(plan.url).toMatch(
+      /^https:\/\/api\.biorxiv\.org\/details\/biorxiv\/\d{4}-\d{2}-\d{2}\/\d{4}-\d{2}-\d{2}\/0\/json$/,
+    )
+    const dates = plan.url.match(/(\d{4}-\d{2}-\d{2})\/(\d{4}-\d{2}-\d{2})/)!
+    const span = (Date.parse(dates[2]!) - Date.parse(dates[1]!)) / 86_400_000
+    expect(span).toBe(3)
+    // medrxiv 也要能跑，server 是路径首段
+    expect((await rt.buildPlan(env, { op: 'recent', id: 'medrxiv', query: [] })).url).toContain(
+      '/details/medrxiv/',
+    )
+    for (const bad of ['0', '31', 'x', '', '3;drop']) {
+      await expect(
+        rt.buildPlan(env, { op: 'recent', id: 'biorxiv', query: [['days', bad]] }),
+      ).rejects.toThrow(/invalid days/)
+    }
+    await expect(
+      rt.buildPlan(env, { op: 'recent', id: 'biorxiv', query: [['days', '10']] }),
+    ).resolves.toBeDefined()
+    await expect(rt.buildPlan(env, { op: 'recent', id: 'arxiv', query: [] })).rejects.toThrow(
+      /invalid server/,
+    )
+  })
+
+  it('biorxiv：range 的 from/to 走 query 且必须 from <= to', async () => {
+    const rt = runtimeFor('biorxiv')!
+    expect(
+      (
+        await rt.buildPlan(env, {
+          op: 'range',
+          id: 'biorxiv',
+          query: [
+            ['from', '2026-09-01'],
+            ['to', '2026-09-29'],
+          ],
+        })
+      ).url,
+    ).toBe('https://api.biorxiv.org/details/biorxiv/2026-09-01/2026-09-29/0/json')
+    await expect(
+      rt.buildPlan(env, {
+        op: 'range',
+        id: 'biorxiv',
+        query: [
+          ['from', '2026-09-29'],
+          ['to', '2026-09-01'],
+        ],
+      }),
+    ).rejects.toThrow(/from must not be after to/)
+    await expect(
+      rt.buildPlan(env, { op: 'range', id: 'biorxiv', query: [['from', '20260901']] }),
+    ).rejects.toThrow(/invalid from/)
+  })
+
+  it('biorxiv：detail 的 DOI 含斜杠，靠多段 path 还原', async () => {
+    const rt = runtimeFor('biorxiv')!
+    expect(
+      (await rt.buildPlan(env, { op: 'detail', id: 'biorxiv/10.1101/2020.09.09.20191205', query: [] }))
+        .url,
+    ).toBe('https://api.biorxiv.org/details/biorxiv/10.1101/2020.09.09.20191205/na/json')
+    for (const bad of ['biorxiv/../../admin', 'biorxiv/10.1234/x', 'biorxiv/']) {
+      await expect(rt.buildPlan(env, { op: 'detail', id: bad, query: [] })).rejects.toThrow(
+        /invalid doi/,
+      )
+    }
+  })
+
+  it('biorxiv：提取器拼落地页链接、剥 HTML，并把版本号带进 URL', () => {
+    const body = JSON.stringify({
+      messages: [],
+      collection: [
+        {
+          doi: '10.1101/2026.04.20.123456',
+          title: 'A & B <i>study</i>',
+          authors: 'Doe J, Roe R',
+          date: '2026-04-20',
+          version: '1',
+          type: 'new results',
+          category: 'genomics',
+          abstract: 'x & y<script>bad()</script>',
+          server: 'biorxiv',
+        },
+      ],
+    })
+    const out = reshape('biorxiv', 'recent', 'biorxiv', [], body)
+    expect(out.type).toBe('biorxiv:biorxiv:recent')
+    expect(out.update_time).toBe(new Date('2026-04-20T00:00:00.000Z').toISOString())
+    const list = out.list as Array<Record<string, unknown>>
+    expect(list).toHaveLength(1)
+    expect(list[0]!.index).toBe(1)
+    expect(list[0]!.title).toBe('A & B study')
+    expect(list[0]!.url).toBe('https://www.biorxiv.org/content/10.1101/2026.04.20.123456v1')
+    // 预印本没有互动量，热度位恒 0
+    expect(list[0]!.hot_value).toBe('0')
+    // extra 保留上游原字段；collection 里的 messages 不该漏进 feed 级 top
+    expect(list[0]!.extra).toMatchObject({ authors: 'Doe J, Roe R', category: 'genomics' })
+    expect(out).not.toHaveProperty('collection')
+    // id 首段决定落地页域名：medrxiv 不该落到 biorxiv 域
+    const med = reshape(
+      'biorxiv',
+      'recent',
+      'medrxiv',
+      [],
+      JSON.stringify({ collection: [{ doi: '10.1101/2026.04.20.1', title: 't', version: '2' }] }),
+    )
+    expect((med.list as Array<Record<string, unknown>>)[0]!.url).toBe(
+      'https://www.medrxiv.org/content/10.1101/2026.04.20.1v2',
+    )
+  })
+
+  it('biorxiv：上游 200 + messages 是报错，必须返回 undefined 而不是空榜', () => {
+    const body = JSON.stringify({
+      messages: [{ status: 'Both dates must be in yyyy-mm-dd format' }],
+      collection: [],
+    })
+    expect(reshapeOut('biorxiv', 'recent', 'biorxiv', [], body)).toBeUndefined()
+    // 合法空区间则是合法空榜
+    const empty = reshapeOut('biorxiv', 'recent', 'biorxiv', [], JSON.stringify({ collection: [] }))
+    expect(JSON.parse(empty!.text).list).toEqual([])
+    // 缺 collection 的畸形响应同样不产出条目
+    expect(reshapeOut('biorxiv', 'recent', 'biorxiv', [], JSON.stringify({}))).toBeUndefined()
+  })
+
+  it('hal：sort 用空格分隔而非逗号，rows/start 上限受控', async () => {
+    const rt = runtimeFor('hal')!
+    const plan = await rt.buildPlan(env, {
+      op: 'search',
+      id: '',
+      query: [
+        ['q', 'quantum'],
+        ['rows', '10'],
+        ['start', '0'],
+        ['sort', 'producedDate_s desc'],
+      ],
+    })
+    expect(plan.url).toContain('q=quantum')
+    expect(plan.url).toContain('rows=10')
+    expect(plan.url).toContain('start=0')
+    // 逗号形式上游会回错误体，这里只确认我们按空格分隔编码、不原样透传
+    expect(plan.url).not.toContain(' ')
+    expect(plan.url).not.toContain('sort=producedDate_s,producedDateY_i')
+    expect(decodeURIComponent(plan.url).replace(/\+/g, ' ')).toContain('sort=producedDate_s desc')
+    expect(plan.url).toContain('fl=')
+    // rows 上限 100（52KB 实测远低于 512KB 闸门），由路由层 enforce
+    expect(
+      (await rt.buildPlan(env, { op: 'search', id: '', query: [['q', 'x'], ['rows', '100']] })).url,
+    ).toContain('rows=100')
+    // q 是必填 query，空串直接没有意义
+    await expect(rt.buildPlan(env, { op: 'search', id: '', query: [] })).resolves.toBeDefined()
+  })
+
+  it('hal：detail 走 q=halId_s 而不是不存在的 /doc/{id}', async () => {
+    const rt = runtimeFor('hal')!
+    const plan = await rt.buildPlan(env, { op: 'detail', id: 'hal-05597672', query: [] })
+    expect(plan.url).toContain('api.hal.science/search/')
+    expect(decodeURIComponent(plan.url)).toContain('q=halId_s:hal-05597672')
+    expect(plan.url).toContain('rows=1')
+    for (const bad of ['../../admin', 'x y', '', 'hal-1 OR 1=1;drop']) {
+      await expect(rt.buildPlan(env, { op: 'detail', id: bad, query: [] })).rejects.toThrow(
+        /invalid id/,
+      )
+    }
+  })
+
+  it('hal：提取器取 title_s[0]、拼作者串、剥 HTML，并保留 numFound', () => {
+    const body = JSON.stringify({
+      response: {
+        numFound: 2,
+        docs: [
+          {
+            halId_s: 'hal-05597672',
+            title_s: ['Quantum <b>x</b> &amp; y'],
+            authFullName_s: ['Doe Jane', 'Roe Richard'],
+            producedDate_s: '2026-01-02',
+            uri_s: 'https://hal.science/hal-05597672',
+            structName_s: ['CNRS'],
+          },
+          { halId_s: 'hal-00000001', title_s: ['无作者无摘要'], docType_s: 'article' },
+        ],
+      },
+    })
+    const out = reshape('hal', 'search', '', [['q', 'x']], body)
+    expect(out.type).toBe('hal:search')
+    expect(out.update_time).toBe(new Date('2026-01-02T00:00:00.000Z').toISOString())
+    // docs 被摘掉当 items，剩下的顶层字段（numFound）平铺到 feed 级
+    expect(out.numFound).toBe(2)
+    expect(out).not.toHaveProperty('docs')
+    const list = out.list as Array<Record<string, unknown>>
+    expect(list).toHaveLength(2)
+    expect(list[0]!.title).toBe('Quantum x & y')
+    expect(list[0]!.url).toBe('https://hal.science/hal-05597672')
+    expect(list[0]!.hot_value).toBe('0')
+    expect(list[0]!.extra).toMatchObject({ structName_s: ['CNRS'], authFullName_s: ['Doe Jane', 'Roe Richard'] })
+    // 缺 uri_s 时 url 为空串而不是 undefined，也不能凭 halId 瞎猜落地页
+    expect(list[1]!.url).toBe('')
+    expect(list[1]!.title).toBe('无作者无摘要')
+    const empty = reshapeOut('hal', 'search', '', [], JSON.stringify({ response: { docs: [] } }))
+    expect(JSON.parse(empty!.text).list).toEqual([])
+    // 缺 response / docs 畸形一律 undefined
+    expect(reshapeOut('hal', 'search', '', [], JSON.stringify({}))).toBeUndefined()
+  })
+
+  it('discourse：话题 URL 由 host+slug+id 拼出，热度取浏览量', () => {
+    const body = JSON.stringify({
+      topic_list: {
+        per_page: 10,
+        topics: [
+          {
+            id: 11,
+            title: 'A & B <i>x</i>',
+            slug: 'a-b',
+            posts_count: 7,
+            like_count: 5,
+            views: 321,
+            created_at: '2026-04-01T00:00:00.000Z',
+            last_posted_at: '2026-04-02T00:00:00.000Z',
+          },
+        ],
+      },
+      users: [{ username: 'jane' }],
+    })
+    const out = reshape('discourse', 'hot', 'meta.discourse.org', [], body)
+    expect(out.type).toBe('discourse:meta.discourse.org:hot')
+    // update_time 取 last_posted_at，不是 created_at
+    expect(out.update_time).toBe(new Date('2026-04-02T00:00:00.000Z').toISOString())
+    // topics 摘走当 items，topic_list 剩下的字段平铺到 feed 级
+    expect(out.per_page).toBe(10)
+    expect(out).not.toHaveProperty('topics')
+    const list = out.list as Array<Record<string, unknown>>
+    expect(list[0]!.title).toBe('A & B x')
+    expect(list[0]!.url).toBe('https://meta.discourse.org/t/a-b/11')
+    expect(list[0]!.hot_value).toBe('321')
+    expect(list[0]!.extra).toMatchObject({ posts_count: 7, like_count: 5 })
+    // host 取自 path 参数，换个实例 URL 的域也跟着换
+    const other = reshape('discourse', 'top', 'discourse.nixos.org', [], body)
+    expect((other.list as Array<Record<string, unknown>>)[0]!.url).toBe(
+      'https://discourse.nixos.org/t/a-b/11',
+    )
+    expect(reshapeOut('discourse', 'hot', 'meta.discourse.org', [], JSON.stringify({}))).toBeUndefined()
+  })
+
+  it('peertube：热榜取播放页绝对地址，热度取浏览量', () => {
+    const body = JSON.stringify({
+      total: 1,
+      data: [
+        {
+          uuid: 'u1',
+          name: 'A & B',
+          publishedAt: '2026-04-01T10:00:00.000Z',
+          duration: 3661,
+          views: 100,
+          likes: 5,
+          isLive: false,
+          url: 'https://framatube.org/w/u1',
+          streamingPlaylists: [{ x: 1 }],
+        },
+      ],
+    })
+    const out = reshape('peertube', 'trending', 'framatube.org', [], body)
+    expect(out.type).toBe('peertube:framatube.org:trending')
+    expect(out.update_time).toBe(new Date('2026-04-01T10:00:00.000Z').toISOString())
+    expect(out.total).toBe(1)
+    const list = out.list as Array<Record<string, unknown>>
+    expect(list[0]!.title).toBe('A & B')
+    expect(list[0]!.url).toBe('https://framatube.org/w/u1')
+    expect(list[0]!.hot_value).toBe('100')
+    expect(list[0]!.extra).toMatchObject({ duration: 3661, likes: 5 })
+    const empty = reshapeOut('peertube', 'trending', 'framatube.org', [], JSON.stringify({ data: [] }))
+    expect(JSON.parse(empty!.text).list).toEqual([])
+    expect(reshapeOut('peertube', 'trending', 'framatube.org', [], JSON.stringify({}))).toBeUndefined()
+  })
+
+  it('四个新源的 rss/atom 产出良构 XML 且条目时间可解析', () => {
+    for (const [provider, op, id, body] of [
+      [
+        'biorxiv',
+        'recent',
+        'biorxiv',
+        JSON.stringify({
+          collection: [{ doi: '10.1101/2026.04.20.1', title: 'p', date: '2026-04-20', version: '1' }],
+        }),
+      ],
+      [
+        'hal',
+        'search',
+        '',
+        JSON.stringify({
+          response: { docs: [{ halId_s: 'hal-1', title_s: ['h'], producedDate_s: '2026-01-02', uri_s: 'https://hal.science/hal-1' }] },
+        }),
+      ],
+      [
+        'discourse',
+        'hot',
+        'meta.discourse.org',
+        JSON.stringify({ topic_list: { topics: [{ id: 1, title: 'd', slug: 'd', views: 2, last_posted_at: '2026-04-02T00:00:00.000Z' }] } }),
+      ],
+      [
+        'peertube',
+        'trending',
+        'framatube.org',
+        JSON.stringify({ data: [{ name: 'v', url: 'https://framatube.org/w/u1', views: 3, publishedAt: '2026-04-01T10:00:00.000Z' }] }),
+      ],
+    ] as const) {
+      for (const format of ['rss', 'atom'] as const) {
+        const out = reshapeOut(provider, op, id, [['format', format]], body)
+        expect(out, `${provider}:${op}:${format}`).toBeDefined()
+        expectWellFormed(out!.text)
+        expect(out!.contentType).toContain(format === 'rss' ? 'rss+xml' : 'atom+xml')
+      }
+    }
+  })
+
+  it('discourse：period/order 白名单与 forum 白名单', async () => {
+    const rt = runtimeFor('discourse')!
+    expect((await rt.buildPlan(env, { op: 'hot', id: 'meta.discourse.org', query: [] })).url).toBe(
+      'https://meta.discourse.org/hot.json?per_page=10',
+    )
+    expect(
+      (
+        await rt.buildPlan(env, {
+          op: 'top',
+          id: 'discuss.python.org',
+          query: [
+            ['period', 'weekly'],
+            ['per_page', '30'],
+          ],
+        })
+      ).url,
+    ).toBe('https://discuss.python.org/top.json?period=weekly&per_page=30')
+    expect(
+      (await rt.buildPlan(env, { op: 'latest', id: 'forums.swift.org', query: [['order', 'created']] }))
+        .url,
+    ).toBe('https://forums.swift.org/latest.json?order=created&per_page=10')
+    for (const bad of ['linux.meta.discourse.org', 'evil.example', 'a/b', '']) {
+      await expect(rt.buildPlan(env, { op: 'hot', id: bad, query: [] })).rejects.toThrow(
+        /invalid forum/,
+      )
+    }
+    await expect(
+      rt.buildPlan(env, { op: 'top', id: 'meta.discourse.org', query: [['period', 'yearly']] }),
+    ).rejects.toMatchObject({ status: 400, details: { allowed: expect.arrayContaining(['daily']) } })
+  })
+
+  it('四个新源的 feed 端点都挂上 format，item 端点不挂', () => {
+    const feedOps: Array<[string, string]> = [
+      ['biorxiv', 'recent'],
+      ['biorxiv', 'range'],
+      ['hal', 'search'],
+      ['discourse', 'hot'],
+      ['discourse', 'top'],
+      ['discourse', 'latest'],
+      ['peertube', 'trending'],
+      ['peertube', 'views'],
+      ['peertube', 'likes'],
+      ['peertube', 'latest'],
+    ]
+    for (const [provider, op] of feedOps) {
+      const found = allEndpoints().find(
+        (e) => e.provider.name === provider && e.endpoint.op === op,
+      )!
+      expect(found.endpoint.params.some((p) => p.name === 'format')).toBe(true)
+    }
+    for (const [provider, op] of [
+      ['biorxiv', 'detail'],
+      ['hal', 'detail'],
+    ] as const) {
+      const found = allEndpoints().find(
+        (e) => e.provider.name === provider && e.endpoint.op === op,
+      )!
+      expect(found.endpoint.params.some((p) => p.name === 'format')).toBe(false)
+    }
+  })
+
+  it('新增源的 host 与 quota 默认值齐备', () => {
+    for (const [name, hosts] of [
+      ['biorxiv', 1],
+      ['hal', 1],
+      ['discourse', 5],
+      ['peertube', 6],
+    ] as const) {
+      const found = allEndpoints().find((e) => e.provider.name === name)!
+      expect(found.provider.hosts).toHaveLength(hosts)
+      expect(found.provider.tier).toBe('A-')
+      expect(found.provider.endpoints.every((e) => e.passthrough && e.inline)).toBe(true)
+      expect(Number(SETTINGS_DEFAULTS[`quota.${name}.default`])).toBeGreaterThan(0)
+      for (const host of found.provider.hosts) {
+        expect(String(SETTINGS_DEFAULTS['upstream.allowlist']).split(',')).toContain(host)
+      }
+    }
   })
 })
